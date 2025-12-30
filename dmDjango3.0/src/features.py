@@ -25,7 +25,6 @@ class DatabaseFeatures(BaseDatabaseFeatures):
     can_defer_constraint_checks = False
     supports_partially_nullable_unique_constraints = False
     truncates_names = True
-    has_bulk_insert = False
     supports_tablespaces = True
     supports_sequence_reset = False
     can_introspect_default = False  # Pending implementation by an interested person.
@@ -39,6 +38,11 @@ class DatabaseFeatures(BaseDatabaseFeatures):
     bare_select_suffix = " FROM DUAL"
     uppercases_column_names = True
     supports_select_for_update_with_limit = False
+    allows_group_by_select_index = False
+    can_return_columns_from_insert = True
+    has_select_for_update_of = True
+    select_for_update_of_column = True
+    has_select_for_update_skip_locked = True
     
     supports_primitives_in_json_field = True
     supports_json_field_contains = True

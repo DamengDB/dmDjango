@@ -4,13 +4,7 @@ from django.utils.encoding import force_bytes, force_text
 
 from .base import Database
 
-if int(Database.version.split('.', 1)[0]) >= 5 and \
-        (int(Database.version.split('.', 2)[1]) >= 1 or
-         not hasattr(Database, 'UNICODE')):
-    convert_unicode = force_text
-else:
-    convert_unicode = force_bytes
-
+convert_unicode = force_bytes
 
 class InsertIdVar(object):
     """

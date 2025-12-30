@@ -3,13 +3,9 @@ import copy
 import datetime
 import re
 import sys
-
 import django
 from django.db.backends.base.schema import BaseDatabaseSchemaEditor
 from django.db.utils import DatabaseError
-if django.VERSION<(3,0):
-    from django.utils import six
-
 
 class DatabaseSchemaEditor(BaseDatabaseSchemaEditor):
     """

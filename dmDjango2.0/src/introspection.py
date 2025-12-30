@@ -1,7 +1,7 @@
 from collections import namedtuple
 import re
 import dmPython
-
+from django.db import models
 from django.db.backends.base.introspection import (
     BaseDatabaseIntrospection, FieldInfo, TableInfo,
 )
@@ -32,6 +32,17 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
     
     cache_bust_counter = 1
 
+    def identifier_converter(self, name):
+        return name.lower()
+
+    def table_name_converter(self, name):
+
+        return self.identifier_converter(name)
+
+    def column_name_converter(self, name):
+
+        return self.identifier_converter(name)
+
     def get_table_list(self, cursor):
         "Returns a list of table names in the current database."
         cursor.execute("""SELECT all_tables.table_name,
@@ -49,7 +60,7 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
             UNION ALL
             SELECT mview_name, 'v' FROM user_mviews""" % (cursor.cursor.cursor.connection.current_schema.replace('\'', '\'\'')))
             
-        return [TableInfo(row[0], row[1])
+        return [TableInfo(self.identifier_converter(row[0]), row[1])
                 for row in cursor.fetchall()]
 
     def get_table_description(self, cursor, table_name):
@@ -105,10 +116,11 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
         Returns a dictionary of {field_name: (field_name_other_table, other_table)}
         representing all relationships to the given table.
         """
+        table_name = table_name.upper()
         constraints = self.get_key_columns(cursor, table_name)
         relations = {}
         for my_fieldname, other_table, other_field in constraints:
-            relations[my_fieldname] = (other_field, other_table)
+            relations[self.identifier_converter(my_fieldname)] = (self.identifier_converter(other_field), self.identifier_converter(other_table))
         return relations
 
     def get_key_columns(self, cursor, table_name):
@@ -124,11 +136,13 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
            user_constraints.constraint_name = ca.constraint_name AND
            user_constraints.r_constraint_name = cb.constraint_name AND
            ca.position = cb.position
-        """ % (table_name.replace('\'', '\'\''))
+        """ % (table_name.upper().replace('\'', '\'\''))
          
-        key_columns = []
         cursor.execute(sql)
-        key_columns.extend(cursor.fetchall())
+        key_columns =  [
+            tuple(self.identifier_converter(cell) for cell in row)
+            for row in cursor.fetchall()
+        ]
         return key_columns
 
     def get_indexes(self, cursor, table_name):
@@ -299,7 +313,7 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
                 user_constraints.constraint_name = cols.constraint_name
                 AND user_constraints.table_name = cols.table_name
                 AND user_constraints.constraint_type = 'P'
-                AND cols.table_name = ?
+                AND cols.table_name = UPPER(?)
         """, [table_name])
         row = cursor.fetchone()
         if row:

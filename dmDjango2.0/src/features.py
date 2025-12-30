@@ -8,8 +8,12 @@ except ImportError:
 
 
 class DatabaseFeatures(BaseDatabaseFeatures):
+    has_bulk_insert = True
+    driver_supports_timedelta_args = True
+    supports_paramstyle_pyformat = False
     can_use_chunked_reads = True
     empty_fetchmany_value = []
+    interprets_empty_strings_as_nulls = False
     uses_savepoints = True
     has_select_for_update = True
     has_select_for_update_nowait = True
@@ -21,10 +25,9 @@ class DatabaseFeatures(BaseDatabaseFeatures):
     has_zoneinfo_database = pytz is not None
     supports_bitwise_or = False
     has_native_duration_field = True
-    can_defer_constraint_checks = True
+    can_defer_constraint_checks = False
     supports_partially_nullable_unique_constraints = False
     truncates_names = True
-    has_bulk_insert = False
     supports_tablespaces = True
     supports_sequence_reset = False
     can_introspect_default = False  # Pending implementation by an interested person.
@@ -38,6 +41,10 @@ class DatabaseFeatures(BaseDatabaseFeatures):
     bare_select_suffix = " FROM DUAL"
     uppercases_column_names = True
     supports_select_for_update_with_limit = False
+    allows_group_by_select_index = False
+    has_select_for_update_of = True
+    select_for_update_of_column = True
+    has_select_for_update_skip_locked = True
 
     def introspected_boolean_field_type(self, field=None, created_separately=False):    
         return super(DatabaseFeatures, self).introspected_boolean_field_type(field, created_separately)

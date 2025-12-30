@@ -113,10 +113,10 @@ class DatabaseCreation(BaseDatabaseCreation):
         if verbosity >= 2:
             print("_create_test_db(): dbname = %s" % parameters['dbname'])
         statements = [
-            """CREATE TABLESPACE %(tblspace)s
-               DATAFILE '%(tblspace)s.dbf' SIZE 128
+            """CREATE TABLESPACE "{}"
+               DATAFILE '{}' SIZE 128
                AUTOEXTEND ON NEXT 10
-            """,
+            """.format(parameters["tblspace"].replace('"', '""'), parameters["tblspace"].replace("'", "''") + ".dbf"),
         ]
         self._execute_statements(cursor, statements, parameters, verbosity)
 
@@ -124,9 +124,9 @@ class DatabaseCreation(BaseDatabaseCreation):
         if verbosity >= 2:
             print("_create_test_user(): username = %s" % parameters['user'])
         statements = [
-            """CREATE USER %(user)s
-               IDENTIFIED BY %(password)s
-               DEFAULT TABLESPACE %(tblspace)s
+            """CREATE USER "%(user)s"
+               IDENTIFIED BY "%(password)s"
+               DEFAULT TABLESPACE "%(tblspace)s"
             """,
             """GRANT CREATE SESSION,
                      CREATE TABLE,
@@ -136,16 +136,21 @@ class DatabaseCreation(BaseDatabaseCreation):
                      CREATE INDEX,
                      CREATE VIEW,
                      CREATE MATERIALIZED VIEW
-               TO %(user)s""",
+               TO "%(user)s"
+               """,
         ]
+        parameters["user"] = parameters["user"].replace('"', '""')
+        parameters["password"] = parameters["password"].replace('"', '""')
+        parameters["tblspace"] = parameters["tblspace"].replace('"', '""')
         self._execute_statements(cursor, statements, parameters, verbosity)
 
     def _execute_test_db_destruction(self, cursor, parameters, verbosity):
         if verbosity >= 2:
             print("_execute_test_db_destruction(): dbname=%s" % parameters['dbname'])
         statements = [
-            'DROP TABLESPACE if exists %(tblspace)s ',
+            'DROP TABLESPACE if exists "%(tblspace)s" ',
             ]
+        parameters["tblspace"] = parameters["tblspace"].replace('"', '""')
         self._execute_statements(cursor, statements, parameters, verbosity)
 
     def _destroy_test_user(self, cursor, parameters, verbosity):
@@ -153,8 +158,9 @@ class DatabaseCreation(BaseDatabaseCreation):
             print("_destroy_test_user(): user=%s" % parameters['user'])
             print("Be patient.  This can take some time...")
         statements = [
-            'DROP USER %(user)s CASCADE',
+            'DROP USER IF EXISTS "%(user)s" CASCADE',
         ]
+        parameters["user"] = parameters["user"].replace('"', '""')
         self._execute_statements(cursor, statements, parameters, verbosity)
 
     def _execute_statements(self, cursor, statements, parameters, verbosity):

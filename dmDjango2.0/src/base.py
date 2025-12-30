@@ -5,7 +5,7 @@ from __future__ import unicode_literals
 
 import datetime
 import decimal
-import os
+import os, re
 import platform
 import sys
 import warnings
@@ -19,7 +19,7 @@ if django.VERSION<(3,0):
     from django.utils import six, timezone
 from django.utils.duration import duration_string
 from django.utils.encoding import force_bytes, force_text
-from django.utils.functional import cached_property
+from django.utils.functional import cached_property, SimpleLazyObject
 
 try:
     import dmPython as Database
@@ -48,14 +48,14 @@ class DatabaseWrapper(BaseDatabaseWrapper):
         'BigAutoField': 'BIGINT IDENTITY(1,1)',
         'BinaryField': 'BLOB',
         'BooleanField': 'bit',
-        'CharField': 'VARCHAR(%(max_length)s)',
+        'CharField': 'NVARCHAR2(%(max_length)s)',
         'CommaSeparatedIntegerField': 'VARCHAR(%(max_length)s)',
         'DateField': 'DATE',
         'DateTimeField': 'TIMESTAMP',
         'DecimalField': 'NUMBER(%(max_digits)s, %(decimal_places)s)',
         'DurationField': 'INTERVAL DAY(9) TO SECOND(6)',
-        'FileField': 'VARCHAR(%(max_length)s)',
-        'FilePathField': 'VARCHAR(%(max_length)s)',
+        'FileField': 'NVARCHAR2(%(max_length)s)',
+        'FilePathField': 'NVARCHAR2(%(max_length)s)',
         'FloatField': 'DOUBLE PRECISION',
         'IntegerField': 'INTEGER',
         'BigIntegerField': 'BIGINT',
@@ -65,7 +65,7 @@ class DatabaseWrapper(BaseDatabaseWrapper):
         'OneToOneField': 'INTEGER',
         'PositiveIntegerField': 'INTEGER',
         'PositiveSmallIntegerField': 'SMALLINT',
-        'SlugField': 'VARCHAR(%(max_length)s)',
+        'SlugField': 'NVARCHAR2(%(max_length)s)',
         'SmallIntegerField': 'SMALLINT',
         'TextField': 'TEXT',
         'TimeField': 'TIME',
@@ -82,29 +82,27 @@ class DatabaseWrapper(BaseDatabaseWrapper):
 
     operators = {
         'exact': '= %s',
-        'iexact': 'LIKE %s',
-        'contains': 'LIKE %s',
-        'icontains': 'LIKE %s',
-        'regex': 'REGEXP %s',
-        'iregex': 'REGEXP %s',
+        'iexact': '= UPPER(%s)',
+        'contains': "LIKE %s ESCAPE '\\'",
+        'icontains': "LIKE UPPER(%s) ESCAPE '\\'",
         'gt': '> %s',
         'gte': '>= %s',
         'lt': '< %s',
         'lte': '<= %s',
-        'startswith': 'LIKE %s',
-        'endswith': 'LIKE %s',
-        'istartswith': 'LIKE %s',
-        'iendswith': 'LIKE %s',
+        'startswith': "LIKE %s ESCAPE '\\'",
+        'endswith': "LIKE %s ESCAPE '\\'",
+        'istartswith': "LIKE UPPER(%s) ESCAPE '\\'",
+        'iendswith': "LIKE UPPER(%s) ESCAPE '\\'",
     }
-    
-    pattern_esc = r"REPLACE(REPLACE(REPLACE({}, '\\', '\\\\'), '%%', '\%%'), '_', '\_')"
+
+    pattern_esc = r"REPLACE(REPLACE(REPLACE({}, '\', '\\'), '%', '\%'), '_', '\_')"
     pattern_ops = {
-        'contains': "LIKE BINARY CONCAT('%%', {}, '%%')",
-        'icontains': "LIKE CONCAT('%%', {}, '%%')",
-        'startswith': "LIKE BINARY CONCAT({}, '%%')",
-        'istartswith': "LIKE CONCAT({}, '%%')",
-        'endswith': "LIKE BINARY CONCAT('%%', {})",
-        'iendswith': "LIKE CONCAT('%%', {})",
+        'contains': r"LIKE '%' || {} || '%' ESCAPE '\'",
+        'icontains': r"LIKE '%' || UPPER({}) || '%' ESCAPE '\'",
+        'startswith': r"LIKE {} || '%' ESCAPE '\'",
+        'istartswith': r"LIKE UPPER({}) || '%%' ESCAPE '\'",
+        'endswith': r"LIKE '%' || {} ESCAPE '\'",
+        'iendswith': r"LIKE '%' || UPPER({}) ESCAPE '\'",
     }
 
     Database = Database
@@ -162,6 +160,13 @@ class DatabaseWrapper(BaseDatabaseWrapper):
     
     def get_new_connection(self, conn_params):
         params = self._connect_string()
+        if 'char_default' in conn_params:
+            if type(conn_params['empty_string_as_null']) is bool:
+                if conn_params['empty_string_as_null'] is True:
+                    self.features.interprets_empty_strings_as_nulls = True
+                del conn_params['empty_string_as_null']
+            else:
+                raise ValueError("The empty_string_as_null must be of bool type")
         return Database.connect(user = params['user'], 
                                 password = params['password'],
                                 host = params['host'],
@@ -198,10 +203,24 @@ class DatabaseWrapper(BaseDatabaseWrapper):
         try:
             return int(self.dameng_full_version.split('.')[0])
         except ValueError:
-            return None        
-    
-    
-    
+            return None
+
+def _lazy_re_compile(regex, flags=0):
+    """Lazily compile a regex with flags."""
+    def _compile():
+        # Compile the regex if it was not passed pre-compiled.
+        if isinstance(regex, (str, bytes)):
+            return re.compile(regex, flags)
+        else:
+            assert not flags, (
+                'flags must be empty if regex is passed pre-compiled'
+            )
+            return regex
+    return SimpleLazyObject(_compile)
+
+FORMAT_QMARK_REGEX = _lazy_re_compile(r'(?<!%)%s')
+BYTES_FORMAT_QMARK_REGEX = _lazy_re_compile(b'(?<!%)%s')
+
 class CursorWrapper(object):
         
     codes_for_integrityerror = (1048,)
@@ -209,9 +228,16 @@ class CursorWrapper(object):
     def __init__(self, cursor):
         self.cursor = cursor
 
+    def convert_query(self, query):
+        if isinstance(query, bytes):
+            return BYTES_FORMAT_QMARK_REGEX.sub(b'?', query).replace(b'%%', b'%')
+        else:
+            return FORMAT_QMARK_REGEX.sub('?', query).replace('%%', '%')
+
     def execute(self, query, args=None):
         try:
             # args is None means no string interpolation
+            query = self.convert_query(query)
             return self.cursor.execute(query, args)
         except Database.OperationalError as e:
             # Map some error codes to IntegrityError, since they seem to be

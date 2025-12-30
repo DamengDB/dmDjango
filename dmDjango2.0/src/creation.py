@@ -111,14 +111,10 @@ class DatabaseCreation(BaseDatabaseCreation):
         if verbosity >= 2:
             print("_create_test_db(): dbname = %s" % parameters['dbname'])
         statements = [
-            """CREATE TABLESPACE %(tblspace)s
-               DATAFILE '%(tblspace)s.dbf' SIZE 20M
-               REUSE AUTOEXTEND ON NEXT 10M MAXSIZE 200M
-            """,
-            """CREATE TEMPORARY TABLESPACE %(tblspace_temp)s
-               TEMPFILE '%(tblspace_temp)s.dbf' SIZE 20M
-               REUSE AUTOEXTEND ON NEXT 10M MAXSIZE 100M
-            """,
+            """CREATE TABLESPACE "{}"
+               DATAFILE '{}' SIZE 128
+               AUTOEXTEND ON NEXT 10
+            """.format(parameters["tblspace"].replace('"', '""'), parameters["tblspace"].replace("'", "''") + ".dbf"),
         ]
         self._execute_statements(cursor, statements, parameters, verbosity)
 
@@ -126,11 +122,11 @@ class DatabaseCreation(BaseDatabaseCreation):
         if verbosity >= 2:
             print("_create_test_user(): username = %s" % parameters['user'])
         statements = [
-            """CREATE USER %(user)s
-               IDENTIFIED BY %(password)s
-               DEFAULT TABLESPACE %(tblspace)s
-               TEMPORARY TABLESPACE %(tblspace_temp)s
-               QUOTA UNLIMITED ON %(tblspace)s
+            """CREATE USER "%(user)s"
+               IDENTIFIED BY "%(password)s"
+               DEFAULT TABLESPACE "%(tblspace)s"
+               TEMPORARY TABLESPACE "%(tblspace_temp)s"
+               QUOTA UNLIMITED ON "%(tblspace)s"
             """,
             """GRANT CREATE SESSION,
                      CREATE TABLE,
@@ -140,17 +136,21 @@ class DatabaseCreation(BaseDatabaseCreation):
                      CREATE INDEX,
                      CREATE VIEW,
                      CREATE MATERIALIZED VIEW
-               TO %(user)s""",
+               TO "%(user)s"
+               """,
         ]
+        parameters["user"] = parameters["user"].replace('"', '""')
+        parameters["password"] = parameters["password"].replace('"', '""')
+        parameters["tblspace"] = parameters["tblspace"].replace('"', '""')
         self._execute_statements(cursor, statements, parameters, verbosity)
 
     def _execute_test_db_destruction(self, cursor, parameters, verbosity):
         if verbosity >= 2:
             print("_execute_test_db_destruction(): dbname=%s" % parameters['dbname'])
         statements = [
-            'DROP TABLESPACE %(tblspace)s INCLUDING CONTENTS AND DATAFILES CASCADE CONSTRAINTS',
-            'DROP TABLESPACE %(tblspace_temp)s INCLUDING CONTENTS AND DATAFILES CASCADE CONSTRAINTS',
+            'DROP TABLESPACE if exists "%(tblspace)s" ',
             ]
+        parameters["tblspace"] = parameters["tblspace"].replace('"', '""')
         self._execute_statements(cursor, statements, parameters, verbosity)
 
     def _destroy_test_user(self, cursor, parameters, verbosity):
@@ -158,8 +158,9 @@ class DatabaseCreation(BaseDatabaseCreation):
             print("_destroy_test_user(): user=%s" % parameters['user'])
             print("Be patient.  This can take some time...")
         statements = [
-            'DROP USER %(user)s CASCADE',
+            'DROP USER IF EXISTS "%(user)s" CASCADE',
         ]
+        parameters["user"] = parameters["user"].replace('"', '""')
         self._execute_statements(cursor, statements, parameters, verbosity)
 
     def _execute_statements(self, cursor, statements, parameters, verbosity):
@@ -173,14 +174,15 @@ class DatabaseCreation(BaseDatabaseCreation):
                 sys.stderr.write("Failed (%s)\n" % (err))
                 raise
 
+    def _test_settings_get(self, key, default=None, prefixed=None):
+        settings_dict = self.connection.settings_dict
+        val = settings_dict['TEST'].get(key, default)
+        if val is None and prefixed:
+            val = TEST_DATABASE_PREFIX + settings_dict[prefixed]
+        return val
+
     def _test_database_name(self):
-        name = TEST_DATABASE_PREFIX + self.connection.settings_dict['NAME']
-        try:
-            if self.connection.settings_dict['TEST_NAME']:
-                name = self.connection.settings_dict['TEST_NAME']
-        except AttributeError:
-            pass
-        return name
+        return self._test_settings_get('NAME', prefixed='NAME')
 
     def _test_database_create(self):
         return self.connection.settings_dict.get('TEST_CREATE', True)

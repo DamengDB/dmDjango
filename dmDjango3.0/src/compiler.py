@@ -1,3 +1,6 @@
+import json
+import re
+
 try:
     from itertools import zip_longest
 except ImportError:
@@ -33,6 +36,19 @@ class SQLCompiler(compiler.SQLCompiler):
             sql, params = self.as_cast_type(node, self.connection)
         elif isinstance(node, KeyTransformExact):
             sql, params = node.as_sql(self, self.connection)
+
+            # params传出可能为中文转成的unicode编码，由于数据库不默认转换，此处额外转换
+            temp_params = []
+            for param in params:
+                if type(param) is str and re.compile(r'[\\u4e00-\\u9fa5]').search(param):
+                    try:
+                        temp_params.append("\"" + json.loads(param).replace("\"", "\\\"") + "\"")
+                    except Exception:
+                        temp_params.append(param)
+                else:
+                    temp_params.append(param)
+
+            params = temp_params
         elif isinstance(node, KeyTransformIsNull):
             sql, params = HasKey(
                 node.lhs.lhs,
@@ -80,138 +96,34 @@ class SQLCompiler(compiler.SQLCompiler):
         params.extend(rhs_params)
         rhs_sql = 'AND %s' % rhs_sql
         return '%s %s' % (lhs_sql, rhs_sql), params
-    
-    def get_order_by(self):
-        """
-        Return a list of 2-tuples of form (expr, (sql, params, is_ref)) for the
-        ORDER BY clause.
 
-        The order_by clause can alter the select clause (for example it
-        can add aliases to clauses that do not yet have one, or it can
-        add totally new select clauses).
-        """
-        if self.query.extra_order_by:
-            ordering = self.query.extra_order_by
-        elif not self.query.default_ordering:
-            ordering = self.query.order_by
-        elif self.query.order_by:
-            ordering = self.query.order_by
-        elif self.query.get_meta().ordering:
-            ordering = self.query.get_meta().ordering
-            self._meta_ordering = ordering
-        else:
-            ordering = []
-        if self.query.standard_ordering:
-            asc, desc = ORDER_DIR['ASC']
-        else:
-            asc, desc = ORDER_DIR['DESC']
-
-        order_by = []
-        for field in ordering:
-            if hasattr(field, 'resolve_expression'):
-                if isinstance(field, Value):
-                    # output_field must be resolved for constants.
-                    field = Cast(field, field.output_field)
-                if not isinstance(field, OrderBy):
-                    field = field.asc()
-                if not self.query.standard_ordering:
-                    field = field.copy()
-                    field.reverse_ordering()
-                order_by.append((field, False))
-                continue
-            if field == '?':  # random
-                order_by.append((OrderBy(Random()), False))
-                continue
-
-            col, order = get_order_dir(field, asc)
-            descending = order == 'DESC'
-
-            if col in self.query.annotation_select:
-                # Reference to expression in SELECT clause
-                order_by.append((
-                    OrderBy(Ref(col, self.query.annotation_select[col]), descending=descending),
-                    True))
-                continue
-            if col in self.query.annotations:
-                # References to an expression which is masked out of the SELECT
-                # clause.
-                expr = self.query.annotations[col]
-                if isinstance(expr, Value):
-                    # output_field must be resolved for constants.
-                    expr = Cast(expr, expr.output_field)
-                order_by.append((OrderBy(expr, descending=descending), False))
-                continue
-
-            if '.' in field:
-                # This came in through an extra(order_by=...) addition. Pass it
-                # on verbatim.
-                table, col = col.split('.', 1)
-                order_by.append((
-                    OrderBy(
-                        RawSQL('%s.%s' % (self.quote_name_unless_alias(table), self.quote_name_unless_alias(col)), []),
-                        descending=descending
-                    ), False))
-                continue
-
-            if not self.query.extra or col not in self.query.extra:
-                # 'col' is of the form 'field' or 'field1__field2' or
-                # '-field1__field2__field', etc.
-                order_by.extend(self.find_ordering_name(
-                    field, self.query.get_meta(), default_order=asc))
-            else:
-                if col not in self.query.extra_select:
-                    order_by.append((
-                        OrderBy(RawSQL(*self.query.extra[col]), descending=descending),
-                        False))
-                else:
-                    order_by.append((
-                        OrderBy(Ref(col, RawSQL(*self.query.extra[col])), descending=descending),
-                        True))
-        result = []
-        seen = set()
-
-        for expr, is_ref in order_by:
-            resolved = expr.resolve_expression(self.query, allow_joins=True, reuse=None)
-            if self.query.combinator:
-                src = resolved.get_source_expressions()[0]
-                expr_src = expr.get_source_expressions()[0]
-                # Relabel order by columns to raw numbers if this is a combined
-                # query; necessary since the columns can't be referenced by the
-                # fully qualified name and the simple column names may collide.
-                for idx, (sel_expr, _, col_alias) in enumerate(self.select):
-                    if is_ref and col_alias == src.refs:
-                        src = src.source
-                    elif col_alias and not (
-                        isinstance(expr_src, F) and col_alias == expr_src.name
-                    ):
-                        continue
-                    if src == sel_expr:
-                        resolved.set_source_expressions([RawSQL('%d' % (idx + 1), ())])
-                        break
-                else:
-                    if col_alias:
-                        raise DatabaseError('ORDER BY term does not match any column in the result set.')
-                    # Add column used in ORDER BY clause without an alias to
-                    # the selected columns.
-                    self.query.add_select_col(src)
-                    resolved.set_source_expressions([RawSQL('%d' % len(self.query.select), ())])
-            sql, params = self.compile(resolved)
-            # Don't add the same column twice, but the order direction is
-            # not taken into account so we strip it. When this entire method
-            # is refactored into expressions, then we can check each part as we
-            # generate it.
-            without_ordering = self.ordering_parts.search(sql)[1]
-            params_hash = make_hashable(params)
-            if (without_ordering, params_hash) in seen:
-                continue
-            seen.add((without_ordering, params_hash))
-            result.append((resolved, (sql, params, is_ref)))
-        return result
-    
 class SQLInsertCompiler(compiler.SQLInsertCompiler, SQLCompiler):
     def __init__(self, *args, **kwargs):
         self.return_id = False
         super(SQLInsertCompiler, self).__init__(*args, **kwargs)
+
+    def fix_auto(self, sql, opts, fields, qn):
+        if opts.auto_field is not None:
+            auto_field_column = opts.auto_field.db_column or opts.auto_field.column
+            columns = [f.column for f in fields]
+
+            if auto_field_column in columns and fields or not fields and auto_field_column:
+                table = qn(opts.db_table)
+                sql_format = 'SET IDENTITY_INSERT %s ON WITH REPLACE NULL; %s; SET IDENTITY_INSERT %s OFF;'
+                sql = sql_format % (table, sql, table)
+
+        return sql
+    
+    def as_sql(self):
+        result = super().as_sql()
+        for sql, params in result:
+            opts = self.query.get_meta()
+
+            qn = self.connection.ops.quote_name
+
+            sql = self.fix_auto(sql, opts, self.query.fields, qn)
+
+        return [(sql, params),]
 
     def field_as_sql(self, field, val):
         """
@@ -244,69 +156,7 @@ class SQLDeleteCompiler(compiler.SQLDeleteCompiler, SQLCompiler):
     pass
 
 class SQLUpdateCompiler(compiler.SQLUpdateCompiler, SQLCompiler):
-    def as_sql(self):
-        """
-        Create the SQL for this query. Return the SQL string and list of
-        parameters.
-        """
-        self.pre_sql_setup()
-        if not self.query.values:
-            return '', ()
-        qn = self.quote_name_unless_alias
-        values, update_params = [], []
-        for field, model, val in self.query.values:
-            if hasattr(val, 'resolve_expression'):
-                val = val.resolve_expression(self.query, allow_joins=False, for_save=True)
-                if val.contains_aggregate:
-                    raise FieldError(
-                        'Aggregate functions are not allowed in this query '
-                        '(%s=%r).' % (field.name, val)
-                    )
-                if val.contains_over_clause:
-                    raise FieldError(
-                        'Window expressions are not allowed in this query '
-                        '(%s=%r).' % (field.name, val)
-                    )
-            elif hasattr(val, 'prepare_database_save'):
-                if field.remote_field:
-                    val = field.get_db_prep_save(
-                        val.prepare_database_save(field),
-                        connection=self.connection,
-                    )
-                else:
-                    raise TypeError(
-                        "Tried to update field %s with a model instance, %r. "
-                        "Use a value compatible with %s."
-                        % (field, val, field.__class__.__name__)
-                    )
-            else:
-                val = field.get_db_prep_save(val, connection=self.connection)
-
-            # Getting the placeholder for the field.
-            if hasattr(field, 'get_placeholder'):
-                placeholder = field.get_placeholder(val, self, self.connection)
-            else:
-                placeholder = '%s'
-            name = field.column
-            if hasattr(val, 'as_sql'):
-                sql, params = self.compile(val)
-                placeholder = '%s'
-                values.append('%s = %s' % (qn(name), placeholder % sql))
-                update_params.extend(params)
-            elif val is not None:
-                values.append('%s = %s' % (qn(name), placeholder))
-                update_params.append(val)
-            else:
-                values.append('%s = NULL' % qn(name))
-        table = self.query.base_table
-        result = [
-            'UPDATE %s SET' % qn(table),
-            ', '.join(values),
-        ]
-        where, params = self.compile(self.query.where)
-        if where:
-            result.append('WHERE %s' % where)
-        return ' '.join(result), tuple(update_params + params)    
+    pass
 
 class SQLAggregateCompiler(compiler.SQLAggregateCompiler, SQLCompiler):
     pass

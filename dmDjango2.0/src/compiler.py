@@ -6,33 +6,42 @@ except ImportError:
     from itertools import izip_longest as zip_longest
 
 from django.db.models.sql import compiler
+from django.core.exceptions import FieldError
 from django.db.models.fields import BinaryField
 
 class SQLCompiler(compiler.SQLCompiler):
-    def compile(self, node, select_format=False):
-        vendor_impl = getattr(node, 'as_' + self.connection.vendor, None)
-        
-        if vendor_impl:
-            sql, params = vendor_impl(self, self.connection)
-        else:
-            sql, params = node.as_sql(self, self.connection)
-
-        if django.VERSION<(1, 11):
-            if select_format and not self.subquery:
-                return node.output_field.select_format(self, sql, params)
-        if django.VERSION>=(1, 11):
-            if select_format and not self.query.subquery:
-                return node.output_field.select_format(self, sql, params)
-        
-        if hasattr(node, 'lookup_name'):
-            sql = sql.replace('%s','?')
-        
-        return sql, params
+    pass
 
 class SQLInsertCompiler(compiler.SQLInsertCompiler, SQLCompiler):
     def __init__(self, *args, **kwargs):
         self.return_id = False
         super(SQLInsertCompiler, self).__init__(*args, **kwargs)
+
+    def fix_auto(self, sql, opts, fields, qn):
+        if opts.auto_field is not None and fields or not fields:
+            auto_field_column = opts.auto_field.db_column or opts.auto_field.column
+            columns = [f.column for f in fields]
+
+            if auto_field_column in columns and fields or not fields and auto_field_column:
+
+                table = qn(opts.db_table)
+                sql_format = 'SET IDENTITY_INSERT %s ON WITH REPLACE NULL; %s; SET IDENTITY_INSERT %s OFF;'
+                id_insert_sql = sql_format % (table, sql, table)
+
+                sql = id_insert_sql
+
+        return sql
+
+    def as_sql(self):
+        result = super().as_sql()
+        for sql, params in result:
+            opts = self.query.get_meta()
+
+            qn = self.connection.ops.quote_name
+
+            sql = self.fix_auto(sql, opts, self.query.fields, qn)
+
+        return [(sql, params),]
 
     def field_as_sql(self, field, val):
         """
@@ -65,64 +74,7 @@ class SQLDeleteCompiler(compiler.SQLDeleteCompiler, SQLCompiler):
     pass
 
 class SQLUpdateCompiler(compiler.SQLUpdateCompiler, SQLCompiler):
-    def as_sql(self):
-        self.pre_sql_setup()
-        if not self.query.values:
-            return '', ()
-        qn = self.quote_name_unless_alias
-        values, update_params = [], []
-        for field, model, val in self.query.values:
-            if hasattr(val, 'resolve_expression'):
-                val = val.resolve_expression(self.query, allow_joins=False, for_save=True)
-                if val.contains_aggregate:
-                    raise FieldError("Aggregate functions are not allowed in this query")
-                if val.contains_over_clause:
-                    raise FieldError('Window expressions are not allowed in this query.')
-            elif hasattr(val, 'prepare_database_save'):
-                if field.remote_field:
-                    val = field.get_db_prep_save(
-                        val.prepare_database_save(field),
-                        connection=self.connection,
-                    )
-                else:
-                    raise TypeError(
-                        "Tried to update field %s with a model instance, %r. "
-                        "Use a value compatible with %s."
-                        % (field, val, field.__class__.__name__)
-                    )
-            else:
-                if isinstance(field, BinaryField):
-                    val = bytes(val)
-                else:
-                    val = field.get_db_prep_save(val, connection=self.connection)                
-
-            # Getting the placeholder for the field.
-            if hasattr(field, 'get_placeholder'):
-                placeholder = field.get_placeholder(val, self, self.connection)
-            else:
-                placeholder = '?'
-            name = field.column
-            if hasattr(val, 'as_sql'):
-                sql, params = self.compile(val)
-                values.append('%s = %s' % (qn(name), placeholder % sql))
-                update_params.extend(params)
-            elif val is not None:
-                values.append('%s = %s' % (qn(name), placeholder))
-                update_params.append(val)
-            else:
-                values.append('%s = NULL' % qn(name))
-        if django.VERSION>=(2,0):
-            table=self.query.base_table
-        if django.VERSION<(2,0):
-            table = self.query.tables[0]
-        result = [
-            'UPDATE %s SET' % qn(table),
-            ', '.join(values),
-        ]
-        where, params = self.compile(self.query.where)
-        if where:
-            result.append('WHERE %s' % where)
-        return ' '.join(result), tuple(update_params + params)
+    pass
 
 class SQLAggregateCompiler(compiler.SQLAggregateCompiler, SQLCompiler):
     pass

@@ -10,6 +10,7 @@ import platform
 import sys
 import warnings
 
+import django.db.backends.utils
 from django.conf import settings
 from django.db import utils
 from django.db.backends.base.base import BaseDatabaseWrapper
@@ -34,7 +35,7 @@ from .features import DatabaseFeatures                  # isort:skip
 from .introspection import DatabaseIntrospection        # isort:skip
 from .operations import DatabaseOperations              # isort:skip
 from .schema import DatabaseSchemaEditor                # isort:skip
-from .utils import convert_unicode                      # isort:skip
+from .utils import convert_unicode, InsertVar           # isort:skip
 from .validation import DatabaseValidation              # isort:skip
 
 DatabaseError = Database.DatabaseError
@@ -50,14 +51,14 @@ class DatabaseWrapper(BaseDatabaseWrapper):
         'BigAutoField': 'BIGINT IDENTITY(1,1)',
         'BinaryField': 'BLOB',
         'BooleanField': 'TINYINT',
-        'CharField': 'VARCHAR(%(max_length)s)',
+        'CharField': 'NVARCHAR2(%(max_length)s)',
         'CommaSeparatedIntegerField': 'VARCHAR(%(max_length)s)',
         'DateField': 'DATE',
         'DateTimeField': 'TIMESTAMP',
         'DecimalField': 'NUMBER(%(max_digits)s, %(decimal_places)s)',
         'DurationField': 'INTERVAL DAY(9) TO SECOND(6)',
-        'FileField': 'VARCHAR(%(max_length)s)',
-        'FilePathField': 'VARCHAR(%(max_length)s)',
+        'FileField': 'NVARCHAR2(%(max_length)s)',
+        'FilePathField': 'NVARCHAR2(%(max_length)s)',
         'FloatField': 'DOUBLE PRECISION',
         'IntegerField': 'INTEGER',
         'BigIntegerField': 'BIGINT',
@@ -68,13 +69,14 @@ class DatabaseWrapper(BaseDatabaseWrapper):
         'PositiveIntegerField': 'INTEGER',
         'PositiveBigIntegerField': 'BIGINT',
         'PositiveSmallIntegerField': 'SMALLINT',
-        'SlugField': 'VARCHAR(%(max_length)s)',
+        'SlugField': 'NVARCHAR2(%(max_length)s)',
         'SmallIntegerField': 'SMALLINT',
         'TextField': 'TEXT',
         'TimeField': 'TIMESTAMP',
         'URLField': 'VARCHAR(%(max_length)s)',
         'UUIDField': 'VARCHAR(32)',
         'JSONField': 'JSON',
+        'VectorField': 'VECTOR',
     }
     
     data_type_check_constraints = {
@@ -200,6 +202,13 @@ class DatabaseWrapper(BaseDatabaseWrapper):
     @async_unsafe
     def get_new_connection(self, conn_params):
         params = self._connect_params()
+        if 'empty_string_as_null' in conn_params:
+            if type(conn_params['empty_string_as_null']) is bool:
+                if conn_params['empty_string_as_null'] is True:
+                    self.features.interprets_empty_strings_as_nulls = True
+                del conn_params['empty_string_as_null']
+            else:
+                raise ValueError("The empty_string_as_null must be of bool type")
         try:
             return Database.connect(user = params['user'], 
                                 password = params['password'],
@@ -341,68 +350,6 @@ class CursorWrapper(object):
 
     def __init__(self, cursor):
         self.cursor = cursor
-
-    def _getTableNameBySql(self, sql_org) :
-        sql = sql_org.lower()        
-        '''find begin index'''
-        headlen = 0
-        if -1 != sql.find("insert into"):
-            headlen = len("insert into")
-        elif -1 != sql.find("insert"):
-            headlen = len("insert")
-        else :
-            headlen = 0
-    
-        if 0 == headlen:
-            return None
-    
-        ''' find end index----keyword 'values' is after tablename or tablename(col1,col2...)'''
-        valuesIndex = sql.find("values")
-        if -1 == valuesIndex:
-            return None;
-    
-        '''extract table name'''
-        sqltb = sql_org[headlen : valuesIndex]
-        leftB = sqltb.find("(")
-        if -1 == leftB:
-            return sqltb
-        else :
-            return sqltb[0 : leftB]
-        
-    def _setLastInsertIdentity(self, insertsql, bflag):
-        tbname = self._getTableNameBySql(insertsql)
-            
-        if bflag :
-            self.cursor.execute('SET IDENTITY_INSERT %s ON WITH REPLACE NULL' % tbname)
-        else :
-            self.cursor.execute('SET IDENTITY_INSERT %s OFF' % tbname)
-
-    def _check_placeholder(self, sql):
-        if not isinstance(sql, str):
-            return sql
-        
-        ind = sql.find("%s")
-        if -1 == ind:
-            return sql
-        
-        ret_sql = ""
-        while -1 != ind:
-            ret_sql = ret_sql + sql[0 : ind]
-            sql = sql[ind : ]
-            ret_len = len(ret_sql)
-            
-            if (ret_sql[ret_len - 1] == "'" and sql[2] == "'") or (ret_sql[ret_len - 1] == '"' and sql[2] == '"'):
-                ret_sql = ret_sql + sql[0 : 3] 
-                sql = sql[3 : ]
-            else:
-                ret_sql = ret_sql + "?"
-                sql = sql[2 : ]
-                
-            ind = sql.find("%s")
-            
-        ret_sql = ret_sql + sql
-        
-        return ret_sql
     
     def convert_query(self, query):
         return FORMAT_QMARK_REGEX.sub('?', query).replace('%%', '%')
@@ -414,19 +361,32 @@ class CursorWrapper(object):
                 if args is None:
                     return self.cursor.execute(query, args)
                 
+                args_temp = []
+                pos_list = []
+                has_returning = False
+                if type(args) is tuple or list:
+                    for i in range(len(args)):
+                        if isinstance(args[i], InsertVar):
+                            args_temp.append(None)
+                            has_returning = True
+                            pos_list.append(i)
+                        else:
+                            args_temp.append(args[i])
+
+                args = tuple(args_temp)
+                
                 query = self.convert_query(query)
-                return self.cursor.execute(query, args)
+                result = self.cursor.execute(query, args)
+                if has_returning:
+                    self.returning_tup = tuple(result)
+                    self.has_returning = has_returning
+                    self.pos_tup = tuple(pos_list)
+                return result
             except Database.DatabaseError as e:
                 if hasattr(e.args[0], "code") == False:
                     raise
                 
-                if e.args[0].code == -2723:
-                    self._setLastInsertIdentity(query, True)
-                    self.cursor.execute(query, args)
-                    lastrowid = self.cursor.lastrowid
-                    self._setLastInsertIdentity(query, False)
-                    self.cursor.lastrowid = lastrowid
-                elif e.args[0].code == -6407 or e.args[0].code == -7116:
+                if e.args[0].code == -6407 or e.args[0].code == -7116:
                     self.cursor.execute(query, args)
                 elif e.args[0].code == -6105:
                     raise

@@ -1,8 +1,18 @@
 ## dmDjango
 
-Django是基于Python的Web应用程序框架，dmDjango是DM提供的Django连接DM数据库的驱动，当前版本为 `3.0.5` ，API详见安装目录下的 `《DM8_dmPython使用手册》` ，目前用于适配 `3.0` 以上版本的Django。
+Django是基于Python的Web应用程序框架，dmDjango是DM提供的Django连接DM数据库的驱动，当前版本为 `3.0.7` ，API详见安装目录下的 `《DM8_dmPython使用手册》` ，目前用于适配 `3.0` 以上版本的Django。
 
 ### ChangeLogs
+
+#### dmDjango v3.0.7(2025-09-26)
+
+* 新增了创建连接时设置字符串类型以及派生类型的默认值选项
+
+#### dmDjango v3.0.6(2025-08-18)
+
+* 新增了对于达梦数据库向量类型以及距离函数等的支持
+* 修复了使用 `bulk_create` 方法执行时，执行时长随着插入数量线性增长的问题
+* 新增了对于 `JSON` 类型的支持
 
 #### dmDjango v3.0.5(2025-01-15)
 

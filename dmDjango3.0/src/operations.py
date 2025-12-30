@@ -14,7 +14,7 @@ from django.utils.functional import cached_property
 from django.utils.encoding import force_bytes, force_str
 
 from .base import Database
-from .utils import InsertIdVar, convert_unicode
+from .utils import InsertIdVar, convert_unicode, InsertVar
 
 from django.db.models import AutoField, Exists, ExpressionWrapper
 from django.db.backends.utils import strip_quotes, truncate_name
@@ -87,6 +87,10 @@ END;
         return 'SELECT cache_key FROM %s ORDER BY cache_key LIMIT 1 OFFSET %%s'
 
     if django.VERSION>=(4,1):
+        from django.utils.regex_helper import _lazy_re_compile
+
+        _extract_format_re = _lazy_re_compile(r"[A-Z_]+")
+
         def date_extract_sql(self, lookup_type, sql, params):
             extract_sql = f"TO_CHAR({sql}, %s)"
             extract_param = None
@@ -96,6 +100,7 @@ END;
                 extract_sql = f"TO_CHAR({sql} - 1, %s)"
                 extract_param = "D"
             elif lookup_type == "week":
+                extract_sql = f"CAST(TO_CHAR({sql}, %s) AS INT)"
                 extract_param = "IW"
             elif lookup_type == "quarter":
                 extract_param = "Q"
@@ -119,7 +124,7 @@ END;
             elif lookup_type == 'iso_week_day':
                 return "TO_CHAR(%s - 1, 'D')" % field_name
             elif lookup_type == 'week':
-                return "TO_CHAR(%s, 'IW')" % field_name
+                return "CAST(TO_CHAR(%s, 'IW') AS INT)" % field_name
             elif lookup_type == 'quarter':
                 return "TO_CHAR(%s, 'Q')" % field_name
             elif lookup_type == 'iso_year':
@@ -138,6 +143,37 @@ END;
         fmt = "INTERVAL '%s %02d:%02d:%02d.%06d' DAY(%d) TO SECOND(6)"
         return fmt % (days, hours, minutes, seconds, timedelta.microseconds,
                 day_precision), []
+
+    def return_insert_columns(self, fields):
+        if not fields:
+            return '', ()
+        field_names = []
+        params = []
+        for field in fields:
+            field_names.append('%s.%s' % (
+                self.quote_name(field.model._meta.db_table),
+                self.quote_name(field.column),
+            ))
+            params.append(InsertVar(field))
+        temp_str = 'RETURNING %s INTO %s' % (
+            ', '.join(field_names),
+            ', '.join(['%s'] * len(params)),
+        )
+        temp_str = temp_str.replace('%s', '?')
+        return temp_str, tuple(params)
+
+    def fetch_returned_insert_columns(self, cursor, returning_params):
+
+        if hasattr(cursor.cursor, 'has_returning') and cursor.cursor.has_returning is True:
+            pos_tup = cursor.cursor.pos_tup
+            returning_tup = cursor.cursor.returning_tup
+            result_lst = []
+            for i in pos_tup:
+                result_lst.append(returning_tup[i])
+
+            return tuple(result_lst)
+        else:
+            return cursor.fetchone()
 
     if django.VERSION>=(4,1):
         def date_trunc_sql(self, lookup_type, sql, params, tzname=None):
@@ -197,7 +233,8 @@ END;
     if django.VERSION>=(4,1):
         def datetime_cast_date_sql(self, sql, params, tzname):
             sql, params = self._convert_sql_to_tz(sql, params, tzname)
-            return f"DATE({sql})", params
+            return f"TRUNC({sql})", params
+
     if django.VERSION<(4,1):
         def datetime_cast_date_sql(self, field_name, tzname):
             """
@@ -385,26 +422,10 @@ END;
         column.
         """
         if cursor.lastrowid is not None:
-            lastrowid=cursor.lastrowid
-            rowid_dict={'A':0,'B':1,'C':2,'D':3,'E':4,'F':5,'G':6,'H':7,'I':8,'J':9,
-                        'K':10,'L':11,
-                        'M': 12, 'N': 13, 'O': 14, 'P': 15, 'Q': 16, 'R': 17, 'S': 18, 'T': 19, 'U': 20,
-                        'V': 21, 'W': 22,
-                        'X': 23, 'Y': 24, 'Z': 25, 'a': 26, 'b': 27, 'c': 28, 'd': 29, 'e': 30, 'f': 31,
-                        'g': 32, 'h': 33,
-                        'i': 34, 'j': 35, 'k': 36, 'l': 37, 'm': 38, 'n': 39, 'o': 40, 'p': 41, 'q': 42,
-                        'r': 43, 's': 44,
-                        't': 45, 'u': 46, 'v': 47, 'w': 48, 'x': 49, 'y': 50, 'z': 51, '0': 52, '1': 53,
-                        '2': 54, '3': 55,
-                        '4': 56, '5': 57, '6': 58, '7': 59, '8': 60, '9': 61, '+': 62, '/': 63}
-            rowid_temp=0
-            for i in lastrowid[-8:]:
-                rowid_temp=rowid_temp*64+rowid_dict[i]
-            lastrowid=rowid_temp
-            query = 'select %s from %s where rowid = %s' %(self.quote_name(pk_name), self.quote_name(table_name), lastrowid)
-            cursor.execute(query)
+            query = 'select %s from %s where rowid = ?' % (self.quote_name(pk_name), self.quote_name(table_name),)
+            cursor.execute(query, (cursor.lastrowid,))
         else:
-            cursor.execute('SELECT MAX(%s) from %s' %(self.quote_name(pk_name), self.quote_name(table_name)))
+            cursor.execute('SELECT MAX(%s) from %s' % (self.quote_name(pk_name), self.quote_name(table_name)))
             
         value = cursor.fetchone()[0]
         return value

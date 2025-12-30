@@ -5,10 +5,12 @@ import re
 import uuid
 
 import django
+from functools import lru_cache
 from django.conf import settings
+from django.utils.functional import cached_property
 from django.db.backends.base.operations import BaseDatabaseOperations
 from django.db.backends.utils import truncate_name
-if django.VERSION<(3,0):
+if django.VERSION < (3, 0):
     from django.utils import six
 from django.utils import timezone
 from django.utils.encoding import force_bytes, force_text
@@ -42,18 +44,50 @@ class DatabaseOperations(BaseDatabaseOperations):
     
     # DAMENG stores positive fields as UNSIGNED ints.
     integer_field_ranges = dict(BaseDatabaseOperations.integer_field_ranges,
-        PositiveSmallIntegerField=(0, 65535),
-        PositiveIntegerField=(0, 4294967295),
+        PositiveSmallIntegerField=(0, 32767),
+        PositiveIntegerField=(0, 2147483647),
     )
+
+    _sequence_reset_sql = """
+    DECLARE
+        table_value integer;
+        seq_value integer;
+        seq_name user_tab_identity_cols.sequence_name%%TYPE;
+    BEGIN
+        BEGIN
+            SELECT sequence_name INTO seq_name FROM user_tab_identity_cols
+            WHERE  table_name = '%(table_name)s' AND
+                   column_name = '%(column_name)s';
+            EXCEPTION WHEN NO_DATA_FOUND THEN
+                seq_name := '%(no_autofield_sequence_name)s';
+        END;
+
+        SELECT NVL(MAX(%(column)s), 0) INTO table_value FROM %(table)s;
+        SELECT NVL(last_number - cache_size, 0) INTO seq_value FROM user_sequences
+               WHERE sequence_name = seq_name;
+        WHILE table_value > seq_value LOOP
+            EXECUTE IMMEDIATE 'SELECT "'||seq_name||'".nextval FROM DUAL'
+            INTO seq_value;
+        END LOOP;
+    END;
+    """
 
     def date_extract_sql(self, lookup_type, field_name):
         """
         Given a lookup_type of 'year', 'month' or 'day', returns the SQL that
         extracts a value from the given date field field_name.
         """
-        if lookup_type == 'week_day':            
-            return "DAYOFWEEK(%s)" % field_name
-        else:            
+        if lookup_type == 'week_day':
+            return "TO_CHAR(%s, 'D')" % field_name
+        elif lookup_type == 'iso_week_day':
+            return "TO_CHAR(%s - 1, 'D')" % field_name
+        elif lookup_type == 'week':
+            return "CAST(TO_CHAR(%s, 'IW') AS INT)" % field_name
+        elif lookup_type == 'quarter':
+            return "TO_CHAR(%s, 'Q')" % field_name
+        elif lookup_type == 'iso_year':
+            return "TO_CHAR(%s, 'IYYY')" % field_name
+        else:
             return "EXTRACT(%s FROM %s)" % (lookup_type.upper(), field_name)
 
     def date_interval_sql(self, timedelta):
@@ -112,7 +146,7 @@ class DatabaseOperations(BaseDatabaseOperations):
         """
         field_name = self._convert_field_to_tz(field_name, tzname)
         sql = self.date_extract_sql(lookup_type, field_name)
-        return sql
+        return sql, []
 
     def datetime_trunc_sql(self, lookup_type, field_name, tzname):
         """
@@ -134,7 +168,7 @@ class DatabaseOperations(BaseDatabaseOperations):
             sql = "TRUNC(%s, 'MI')" % field_name
         else:
             sql = "CAST(%s AS DATETIME)" % field_name
-        return sql
+        return sql, []
 
     def deferrable_sql(self):
         """
@@ -243,7 +277,11 @@ class DatabaseOperations(BaseDatabaseOperations):
         """
         if value is None:
             return ''
-        return force_text(value.read())
+
+        if isinstance(value, Database.LOB):
+            value = force_str(value.read())
+
+        return value
 
     def return_insert_id(self):
         """
@@ -260,8 +298,8 @@ class DatabaseOperations(BaseDatabaseOperations):
         not quote the given name if it's already been quoted.
         """    
         if not name.startswith('"') or not name.endswith('"'):
-            name = name.replace('\"', '\"\"')
-            name = '"%s"' % truncate_name(name, self.max_name_length())
+            name = name.replace('"', '""')
+            name = '"%s"' % truncate_name(name.upper(), self.max_name_length())
                     
         return name
 
@@ -306,67 +344,96 @@ class DatabaseOperations(BaseDatabaseOperations):
         """
         return convert_unicode("RELEASE_SAVEPOINT('%s') " % self.quote_name(sid))
 
+    def __foreign_key_constraints(self, table_name, recursive):
+        with self.connection.cursor() as cursor:
+            if recursive:
+                cursor.execute("""
+                    with cons_view as
+                    (select cons.table_name p_tab_name, cons.constraint_name p_cons_name, r_cons.constraint_name r_cons_name, r_cons.table_name r_tab_name
+                    from
+                    user_constraints cons
+                    join
+                    user_constraints r_cons
+                    on
+                    cons.constraint_name = r_cons.r_constraint_name and cons.constraint_type = any('P','U') and r_cons.constraint_type = 'R')
+                    select r_tab_name, r_cons_name from cons_view where p_tab_name = ?;""",
+                   (table_name.upper(),)
+                )
+            else:
+                cursor.execute("""
+                    SELECT
+                        cons.table_name, cons.constraint_name
+                    FROM
+                        user_constraints cons
+                    WHERE
+                        cons.constraint_type = 'R'
+                        AND cons.table_name = ?
+                """, (table_name.upper(),))
+            return cursor.fetchall()
+
+    @cached_property
+    def _foreign_key_constraints(self):
+        # 512 is large enough to fit the ~330 tables (as of this writing) in
+        # Django's test suite.
+        return lru_cache(maxsize=512)(self.__foreign_key_constraints)
+
     def sql_flush(self, style, tables, sequences, allow_cascade=False):
-        """
-        Returns a list of SQL statements required to remove all data from
-        the given database tables (without actually removing the tables
-        themselves).
-
-        The returned value also includes SQL statements required to reset DB
-        sequences passed in :param sequences:.
-
-        The `style` argument is a Style object as returned by either
-        color_style() or no_style() in django.core.management.color.
-
-        The `allow_cascade` argument determines whether truncation may cascade
-        to tables with foreign keys pointing the tables being truncated.
-        PostgreSQL requires a cascade even if these tables are empty.
-        """
-        if tables:            
-            sql = ['%s %s %s;' % (
-                style.SQL_KEYWORD('TRUNCATE'),
-                style.SQL_KEYWORD('TABLE'),
-                style.SQL_FIELD(self.quote_name(table))
-            ) for table in tables]
-            # Since we've just deleted all the rows, running our sequence
-            # ALTER code will reset the sequence to 0.
-            sql.extend(self.sequence_reset_by_name_sql(style, sequences))
-            return sql
-        else:
+        if not tables:
             return []
 
-    def sequence_reset_sql(self, style, model_list):
-        """
-        Returns a list of the SQL statements required to reset sequences for
-        the given models.
+        truncated_tables = {table.upper() for table in tables}
+        constraints = set()
 
-        The `style` argument is a Style object as returned by either
-        color_style() or no_style() in django.core.management.color.
-        """
-        from django.db import models
-        output = []
-        query = self._sequence_reset_sql
-        for model in model_list:
-            for f in model._meta.local_fields:
-                if isinstance(f, models.AutoField):
-                    table_name = self.quote_name(model._meta.db_table)
-                    sequence_name = self._get_sequence_name(model._meta.db_table)
-                    column_name = self.quote_name(f.column)
-                    output.append(query % {'sequence': sequence_name,
-                                           'table': table_name,
-                                           'column': column_name})
-                    # Only one AutoField is allowed per model, so don't
-                    # continue to loop
-                    break
-            for f in model._meta.many_to_many:
-                if not f.remote_field.through:
-                    table_name = self.quote_name(f.m2m_db_table())
-                    sequence_name = self._get_sequence_name(f.m2m_db_table())
-                    column_name = self.quote_name('id')
-                    output.append(query % {'sequence': sequence_name,
-                                           'table': table_name,
-                                           'column': column_name})
-        return output
+        for table in tables:
+            for foreign_table, constraint in self._foreign_key_constraints(table, recursive=allow_cascade):
+                if allow_cascade:
+                    truncated_tables.add(foreign_table)
+                constraints.add((foreign_table, constraint))
+        sql = [
+                  '%s %s %s %s %s %s;' % (
+                      style.SQL_KEYWORD('ALTER'),
+                      style.SQL_KEYWORD('TABLE'),
+                      style.SQL_FIELD(self.quote_name(table)),
+                      style.SQL_KEYWORD('DISABLE'),
+                      style.SQL_KEYWORD('CONSTRAINT'),
+                      style.SQL_FIELD(self.quote_name(constraint)),
+                  ) for table, constraint in constraints
+              ] + [
+                  '%s %s %s;' % (
+                      style.SQL_KEYWORD('TRUNCATE'),
+                      style.SQL_KEYWORD('TABLE'),
+                      style.SQL_FIELD(self.quote_name(table)),
+                  ) for table in truncated_tables
+              ] + [
+                  '%s %s %s %s %s %s;' % (
+                      style.SQL_KEYWORD('ALTER'),
+                      style.SQL_KEYWORD('TABLE'),
+                      style.SQL_FIELD(self.quote_name(table)),
+                      style.SQL_KEYWORD('ENABLE'),
+                      style.SQL_KEYWORD('CONSTRAINT'),
+                      style.SQL_FIELD(self.quote_name(constraint)),
+                  ) for table, constraint in constraints
+              ]
+
+        sql.extend(self.sequence_reset_by_name_sql(style, sequences))
+
+        return sql
+
+    def sequence_reset_by_name_sql(self, style, sequences):
+        sql = []
+        for sequence_info in sequences:
+            no_autofield_sequence_name = self._get_no_autofield_sequence_name(sequence_info['table'])
+            table = self.quote_name(sequence_info['table'])
+            column = self.quote_name(sequence_info['column'] or 'id')
+            query = self._sequence_reset_sql % {
+                'no_autofield_sequence_name': no_autofield_sequence_name,
+                'table': table,
+                'column': column,
+                'table_name': strip_quotes(table),
+                'column_name': strip_quotes(column),
+            }
+            sql.append(query)
+        return sql
 
     def start_transaction_sql(self):
         """
@@ -451,79 +518,43 @@ class DatabaseOperations(BaseDatabaseOperations):
         return converters 
     
     # convert function
-    if django.VERSION>=(2,0):
-        def convert_textfield_value(self, value, expression, connection):
-            if isinstance(value, Database.LOB):
-                value = force_text(value.read())
-            return value
+    def convert_textfield_value(self, value, expression, connection, *args):
+        if isinstance(value, Database.LOB):
+            value = force_text(value.read())
+        return value
 
-        def convert_binaryfield_value(self, value, expression, connection):
-            if isinstance(value, Database.LOB):
-                value = force_bytes(value.read())
-            return value
+    def convert_binaryfield_value(self, value, expression, connection, *args):
+        if isinstance(value, Database.LOB):
+            value = force_bytes(value.read())
+        return value
 
-        def convert_booleanfield_value(self, value, expression, connection):
-            if value in (0, 1):
-                value = bool(value)
-            return value
+    def convert_booleanfield_value(self, value, expression, connection, *args):
+        if value in (0, 1):
+            value = bool(value)
+        if value in ('0', '1'):
+            value = bool(int(value))
+        return value
 
-        def convert_datetimefield_value(self, value, expression, connection):
-            if value is not None:
-                if settings.USE_TZ:
-                    value = timezone.make_aware(value, self.connection.timezone)
-            return value
+    def convert_datetimefield_value(self, value, expression, connection, *args):
+        if value is not None:
+            if settings.USE_TZ:
+                value = timezone.make_aware(value, self.connection.timezone)
+        return value
 
-        def convert_datefield_value(self, value, expression, connection):
-            if isinstance(value, Database.Timestamp):
-                value = value.date()
-            return value
+    def convert_datefield_value(self, value, expression, connection, *args):
+        if isinstance(value, Database.Timestamp):
+            value = value.date()
+        return value
 
-        def convert_timefield_value(self, value, expression, connection):
-            if isinstance(value, Database.Timestamp):
-                value = value.time()
-            return value
+    def convert_timefield_value(self, value, expression, connection, *args):
+        if isinstance(value, Database.Timestamp):
+            value = value.time()
+        return value
 
-        def convert_uuidfield_value(self, value, expression, connection):
-            if value is not None:
-                value = uuid.UUID(value)
-            return value
-
-    if django.VERSION<(2,0):
-        def convert_textfield_value(self, value, expression, connection, context):
-            if isinstance(value, Database.LOB):
-                value = force_text(value.read())
-            return value
-
-        def convert_binaryfield_value(self, value, expression, connection, context):
-            if isinstance(value, Database.LOB):
-                value = force_bytes(value.read())
-            return value
-
-        def convert_booleanfield_value(self, value, expression, connection, context):
-            if value in (0, 1):
-                value = bool(value)
-            return value
-
-        def convert_datetimefield_value(self, value, expression, connection, context):
-            if value is not None:
-                if settings.USE_TZ:
-                    value = timezone.make_aware(value, self.connection.timezone)
-            return value
-
-        def convert_datefield_value(self, value, expression, connection, context):
-            if isinstance(value, Database.Timestamp):
-                value = value.date()
-            return value
-
-        def convert_timefield_value(self, value, expression, connection, context):
-            if isinstance(value, Database.Timestamp):
-                value = value.time()
-            return value
-
-        def convert_uuidfield_value(self, value, expression, connection, context):
-            if value is not None:
-                value = uuid.UUID(value)
-            return value
+    def convert_uuidfield_value(self, value, expression, connection, *args):
+        if value is not None:
+            value = uuid.UUID(value)
+        return value
 
     def combine_expression(self, connector, sub_expressions):
         if connector == '%%':
@@ -555,8 +586,4 @@ class DatabaseOperations(BaseDatabaseOperations):
         Some backends require special syntax to insert binary content (MySQL
         for example uses '_binary %s').
         """
-        return '?'    
-        
-
-
-    
+        return '?'
