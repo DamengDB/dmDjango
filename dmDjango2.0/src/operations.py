@@ -5,7 +5,10 @@ import re
 import uuid
 
 import django
-from functools import lru_cache
+try:
+    from functools import lru_cache
+except Exception as e:
+    from functools32 import lru_cache
 from django.conf import settings
 from django.utils.functional import cached_property
 from django.db.backends.base.operations import BaseDatabaseOperations
@@ -120,14 +123,9 @@ class DatabaseOperations(BaseDatabaseOperations):
             return field_name
         if not self._tzname_re.match(tzname):
             raise ValueError("Invalid time zone name: %s" % tzname)
-        # Convert from UTC to local time, returning TIMESTAMP WITH TIME ZONE.
         result = "(FROM_TZ(%s, '0:00') AT TIME ZONE '%s')" % (field_name, tzname)
-        # Extracting from a TIMESTAMP WITH TIME ZONE ignore the time zone.
-        # Convert to a DATETIME. There's no built-in function to do that; the easiest is to go through a string.
         result = "TO_CHAR(%s, 'YYYY-MM-DD HH24:MI:SS')" % result
         result = "TO_DATE(%s, 'YYYY-MM-DD HH24:MI:SS')" % result
-        # Re-convert to a TIMESTAMP because EXTRACT only handles the date part
-        # on DATE values, even though they actually store the time part.
         return "CAST(%s AS TIMESTAMP)" % result        
 
     def datetime_cast_date_sql(self, field_name, tzname):
@@ -137,6 +135,10 @@ class DatabaseOperations(BaseDatabaseOperations):
         field_name = self._convert_field_to_tz(field_name, tzname)
         sql = 'TRUNC(%s)' % field_name
         return sql, []
+
+    def datetime_cast_time_sql(self, field_name, tzname):
+        field_name = self._convert_field_to_tz(field_name, tzname)
+        return field_name, []
 
     def datetime_extract_sql(self, lookup_type, field_name, tzname):
         """
@@ -169,6 +171,15 @@ class DatabaseOperations(BaseDatabaseOperations):
         else:
             sql = "CAST(%s AS DATETIME)" % field_name
         return sql, []
+
+    def time_trunc_sql(self, lookup_type, field_name):
+        if lookup_type == 'hour':
+            sql = "TRUNC(%s, 'HH24')" % field_name
+        elif lookup_type == 'minute':
+            sql = "TRUNC(%s, 'MI')" % field_name
+        elif lookup_type == 'second':
+            sql = "CAST(%s AS DATE)" % field_name  # Cast to DATE removes sub-second precision.
+        return sql
 
     def deferrable_sql(self):
         """
@@ -300,7 +311,7 @@ class DatabaseOperations(BaseDatabaseOperations):
         if not name.startswith('"') or not name.endswith('"'):
             name = name.replace('"', '""')
             name = '"%s"' % truncate_name(name.upper(), self.max_name_length())
-                    
+
         return name
 
     def random_function_sql(self):
@@ -419,6 +430,10 @@ class DatabaseOperations(BaseDatabaseOperations):
 
         return sql
 
+    def strip_quotes(self, table_name):
+        has_quotes = table_name.startswith('"') and table_name.endswith('"')
+        return table_name[1:-1] if has_quotes else table_name
+
     def sequence_reset_by_name_sql(self, style, sequences):
         sql = []
         for sequence_info in sequences:
@@ -429,8 +444,8 @@ class DatabaseOperations(BaseDatabaseOperations):
                 'no_autofield_sequence_name': no_autofield_sequence_name,
                 'table': table,
                 'column': column,
-                'table_name': strip_quotes(table),
-                'column_name': strip_quotes(column),
+                'table_name': self.strip_quotes(table),
+                'column_name': self.strip_quotes(column),
             }
             sql.append(query)
         return sql
@@ -514,7 +529,14 @@ class DatabaseOperations(BaseDatabaseOperations):
         elif internal_type == 'TimeField':
             converters.append(self.convert_timefield_value)
         elif internal_type == 'UUIDField':
-            converters.append(self.convert_uuidfield_value)        
+            converters.append(self.convert_uuidfield_value)
+
+        if self.connection.features.compatible_mode == 2 and expression.field.empty_strings_allowed:
+            converters.append(
+                self.convert_empty_bytes
+                if internal_type == 'BinaryField' else
+                self.convert_empty_string
+            )
         return converters 
     
     # convert function
@@ -555,6 +577,14 @@ class DatabaseOperations(BaseDatabaseOperations):
         if value is not None:
             value = uuid.UUID(value)
         return value
+
+    @staticmethod
+    def convert_empty_string(value, expression, connection):
+        return '' if value is None else value
+
+    @staticmethod
+    def convert_empty_bytes(value, expression, connection):
+        return b'' if value is None else value
 
     def combine_expression(self, connector, sub_expressions):
         if connector == '%%':

@@ -150,21 +150,21 @@ class DatabaseWrapper(BaseDatabaseWrapper):
         ssl_path = settings_dict['OPTIONS'].get('ssl_path', {}).get('ssl_path')
         ssl_pwd = settings_dict['OPTIONS'].get('ssl_pwd', {}).get('ssl_pwd')            
         
-        if mpp_type :
+        if mpp_type:
             if port is None or port == "":
                 conn_string = '%s/%s*%s@%s' % (user, passwd, mpp_type, host)    #use dm service name in dm_svc.conf to connect to db
             else:
                 conn_string = '%s/%s*%s@%s:%s' % (user, passwd, mpp_type, host, port)
-        else :
+        else:
             if port is None or port == "":
                 conn_string = '%s/%s@%s' % (user, passwd, host)     #use dm service name in dm_svc.conf to connect to db
             else:
                 conn_string = '%s/%s@%s:%s' % (user, passwd, host, port)
                 
-        if ssl_path :
+        if ssl_path:
             conn_string += '#%s' % (ssl_path)
                 
-        if ssl_pwd :
+        if ssl_pwd:
             conn_string += '@%s' % (ssl_pwd) 
         
         return conn_string        
@@ -209,14 +209,23 @@ class DatabaseWrapper(BaseDatabaseWrapper):
                 del conn_params['empty_string_as_null']
             else:
                 raise ValueError("The empty_string_as_null must be of bool type")
+        if 'compatible_mode' in conn_params:
+            if type(conn_params['compatible_mode']) is int:
+                self.features.compatible_mode = conn_params['compatible_mode']
+                del conn_params['compatible_mode']
+            else:
+                raise ValueError("The compatible_mode must be of int type and corresponds to "
+                                 "the following compatibility modes:\n"
+                                 "            0:none, 1:SQL92, 2:Oracle, 3:MS SQL Server, "
+                                 "4:MySQL, 5:DM6, 6:Teradata, 7:PG, 8:DB2")
         try:
-            return Database.connect(user = params['user'], 
-                                password = params['password'],
-                                host = params['host'],
-                                port = params['port'],
-                                mpp_login = params['mpp_login'],
-                                ssl_path = params['ssl_path'],
-                                ssl_pwd = params['ssl_pwd'],
+            return Database.connect(user=params['user'],
+                                password=params['password'],
+                                host=params['host'],
+                                port=params['port'],
+                                mpp_login=params['mpp_login'],
+                                ssl_path=params['ssl_path'],
+                                ssl_pwd=params['ssl_pwd'],
                                 **conn_params
                                 )
         except Database.DatabaseError as e:

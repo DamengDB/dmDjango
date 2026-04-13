@@ -15,7 +15,7 @@ from django.conf import settings
 from django.db import utils
 from django.db.backends.base.base import BaseDatabaseWrapper
 from django.db.backends.base.validation import BaseDatabaseValidation
-if django.VERSION<(3,0):
+if django.VERSION < (3, 0):
     from django.utils import six, timezone
 from django.utils.duration import duration_string
 from django.utils.encoding import force_bytes, force_text
@@ -160,20 +160,31 @@ class DatabaseWrapper(BaseDatabaseWrapper):
     
     def get_new_connection(self, conn_params):
         params = self._connect_string()
-        if 'char_default' in conn_params:
+        if 'empty_string_as_null' in conn_params:
             if type(conn_params['empty_string_as_null']) is bool:
                 if conn_params['empty_string_as_null'] is True:
                     self.features.interprets_empty_strings_as_nulls = True
                 del conn_params['empty_string_as_null']
             else:
                 raise ValueError("The empty_string_as_null must be of bool type")
-        return Database.connect(user = params['user'], 
-                                password = params['password'],
-                                host = params['host'],
-                                port = params['port'],
-                                mpp_login = params['mpp_login'],
-                                ssl_path = params['ssl_path'],
-                                ssl_pwd = params['ssl_pwd'],
+
+        if 'compatible_mode' in conn_params:
+            if type(conn_params['compatible_mode']) is int:
+                self.features.compatible_mode = conn_params['compatible_mode']
+                del conn_params['compatible_mode']
+            else:
+                raise ValueError("The compatible_mode must be of int type and corresponds to "
+                                 "the following compatibility modes:\n"
+                                 "            0:none, 1:SQL92, 2:Oracle, 3:MS SQL Server, "
+                                 "4:MySQL, 5:DM6, 6:Teradata, 7:PG, 8:DB2")
+
+        return Database.connect(user=params['user'],
+                                password=params['password'],
+                                host=params['host'],
+                                port=params['port'],
+                                mpp_login=params['mpp_login'],
+                                ssl_path=params['ssl_path'],
+                                ssl_pwd=params['ssl_pwd'],
                                 **conn_params
                                 )
     
@@ -232,7 +243,10 @@ class CursorWrapper(object):
         if isinstance(query, bytes):
             return BYTES_FORMAT_QMARK_REGEX.sub(b'?', query).replace(b'%%', b'%')
         else:
-            return FORMAT_QMARK_REGEX.sub('?', query).replace('%%', '%')
+            if sys.version_info[0] == 2:
+                return re.sub(FORMAT_QMARK_REGEX, '?', query).replace('%%', '%')
+            else:
+                return FORMAT_QMARK_REGEX.sub('?', query).replace('%%', '%')
 
     def execute(self, query, args=None):
         try:

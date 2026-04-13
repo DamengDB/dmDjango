@@ -46,5 +46,8 @@ class DatabaseFeatures(BaseDatabaseFeatures):
     select_for_update_of_column = True
     has_select_for_update_skip_locked = True
 
+    # Only for dmDjango
+    compatible_mode = 0
+
     def introspected_boolean_field_type(self, field=None, created_separately=False):    
         return super(DatabaseFeatures, self).introspected_boolean_field_type(field, created_separately)

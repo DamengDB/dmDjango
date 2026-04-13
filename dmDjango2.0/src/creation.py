@@ -6,7 +6,7 @@ from django.db.backends.base.creation import BaseDatabaseCreation
 TEST_DATABASE_PREFIX = 'test_'
 
 class DatabaseCreation(BaseDatabaseCreation):            
-    def _create_test_db(self, verbosity=1, autoclobber=False):
+    def _create_test_db(self, verbosity=1, autoclobber=False, keepdb=False):
         TEST_NAME = self._test_database_name()
         TEST_USER = self._test_database_user()
         TEST_PASSWD = self._test_database_passwd()
@@ -24,7 +24,7 @@ class DatabaseCreation(BaseDatabaseCreation):
         cursor = self.connection.cursor()
         if self._test_database_create():
             try:
-                self._execute_test_db_creation(cursor, parameters, verbosity)
+                self._execute_test_db_creation(cursor, parameters, verbosity, keepdb)
             except Exception as e:
                 sys.stderr.write("Got an error creating the test database: %s\n" % e)
                 if not autoclobber:
@@ -33,6 +33,7 @@ class DatabaseCreation(BaseDatabaseCreation):
                     try:
                         if verbosity >= 1:
                             print("Destroying old test database '%s'..." % self.connection.alias)
+                        self._destroy_test_user(cursor, parameters, verbosity)
                         self._execute_test_db_destruction(cursor, parameters, verbosity)
                         self._execute_test_db_creation(cursor, parameters, verbosity)
                     except Exception as e:
@@ -107,7 +108,7 @@ class DatabaseCreation(BaseDatabaseCreation):
             self._execute_test_db_destruction(cursor, parameters, verbosity)
         self.connection.close()
 
-    def _execute_test_db_creation(self, cursor, parameters, verbosity):
+    def _execute_test_db_creation(self, cursor, parameters, verbosity, keepdb=False):
         if verbosity >= 2:
             print("_create_test_db(): dbname = %s" % parameters['dbname'])
         statements = [

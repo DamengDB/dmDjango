@@ -2,12 +2,11 @@ from collections import namedtuple
 import re
 import dmPython
 from django.db import models
-from django.db.backends.base.introspection import (
-    BaseDatabaseIntrospection, FieldInfo, TableInfo,
-)
+from django.db.backends.base.introspection import BaseDatabaseIntrospection
 
-FieldInfo = namedtuple('FieldInfo', FieldInfo._fields + ('extra',))
+TableInfo = namedtuple('TableInfo', ['name', 'type'])
 InfoLine = namedtuple('InfoLine', 'col_name data_type max_len num_prec num_scale extra column_default')
+FieldInfo = namedtuple('FieldInfo', 'name type_code display_size internal_size precision scale null_ok default extra')
 
 foreign_key_re = re.compile(r"\sCONSTRAINT `[^`]*` FOREIGN KEY \(`([^`]*)`\) REFERENCES `([^`]*)` \(`([^`]*)`\)")
 
@@ -16,7 +15,7 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
         dmPython.DATE: 'DateField',
         dmPython.TIME: 'TimeField',
         dmPython.TIMESTAMP: 'DateTimeField',
-        dmPython.NUMBER: 'DecimalField',
+        dmPython.NUMBER: 'IntegerField',
         dmPython.BIGINT: 'BigIntegerField',
         dmPython.ROWID: 'BigIntegerField',
         dmPython.DOUBLE: 'FloatField',
@@ -25,6 +24,7 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
         dmPython.STRING: 'CharField',
         dmPython.FIXED_STRING: 'CharField',
         dmPython.BOOLEAN: 'BooleanField',
+        dmPython.CLOB: 'TextField',
         dmPython.BLOB: 'BinaryField',
         dmPython.STRING: 'TextField',
         dmPython.INTERVAL: 'DurationField',                            
@@ -101,7 +101,7 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
             name = name % {}
             description.append(FieldInfo(
                 self.identifier_converter(name), desc[1], desc[2], internal_size, desc[4] or 0,
-                desc[5] or 0, desc[6], default))
+                desc[5] or 0, desc[6], default, None))
         return description
 
     def _name_to_index(self, cursor, table_name):
@@ -182,22 +182,6 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
         return indexes
 
     def get_constraints(self, cursor, table_name):
-        """
-        Retrieves any constraints or keys (unique, pk, fk, check, index)
-        across one or more columns.
-
-        Returns a dict mapping constraint names to their attributes,
-        where attributes is a dict with keys:
-         * columns: List of columns this covers
-         * primary_key: True if primary key, False otherwise
-         * unique: True if this is a unique constraint, False otherwise
-         * foreign_key: (table, column) of target, or None
-         * check: True if check constraint, False otherwise
-         * index: True if index, False otherwise.
-
-        Some backends may return special constraint names that don't exist
-        if they don't name constraints of a certain type (e.g. SQLite)
-        """
         constraints = {}
         # Loop over the constraints, getting PKs and uniques
         cursor.execute("""
@@ -227,7 +211,6 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
         """ % table_name.upper().replace('\'', '\'\''))
         rows = cursor.fetchall()
         for constraint, columns, pk, unique, check in rows:
-            constraint = self.identifier_converter(constraint)
             constraints[constraint] = {
                 'columns': columns.split(','),
                 'primary_key': bool(pk),
@@ -256,7 +239,6 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
         """ % table_name.upper().replace('\'', '\'\''))
         rows = cursor.fetchall()
         for constraint, columns, other_table, other_column in rows:
-            constraint = self.identifier_converter(constraint)
             constraints[constraint] = {
                 'primary_key': False,
                 'unique': False,
@@ -287,7 +269,6 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
         for constraint, type_, columns, orders in rows:
             if isinstance(constraint, str) and re.findall(r'INDEX\d{8}', constraint):
                 continue
-            constraint = self.identifier_converter(constraint)
             constraints[constraint] = {
                 'primary_key': False,
                 'unique': False,

@@ -79,3 +79,5 @@ class DatabaseFeatures(BaseDatabaseFeatures):
     
     dmDjango = True
 
+    # Only for dmDjango
+    compatible_mode = 0

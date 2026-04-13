@@ -809,6 +809,13 @@ END;
             converters.append(self.convert_uuidfield_value)
         elif internal_type == 'DecimalField':
             converters.append(self.convert_decimalfield_value)
+
+        if self.connection.features.compatible_mode == 2 and expression.field.empty_strings_allowed:
+            converters.append(
+                self.convert_empty_bytes
+                if internal_type == 'BinaryField' else
+                self.convert_empty_string
+            )
         return converters 
     
     # convert function
@@ -856,6 +863,14 @@ END;
         if value is not None:
             value = uuid.UUID(value)
         return value
+
+    @staticmethod
+    def convert_empty_string(value, expression, connection):
+        return '' if value is None else value
+
+    @staticmethod
+    def convert_empty_bytes(value, expression, connection):
+        return b'' if value is None else value
 
     def combine_expression(self, connector, sub_expressions):
 

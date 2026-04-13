@@ -6,7 +6,6 @@ from django.db import models
 from django.db.backends.base.introspection import (
     BaseDatabaseIntrospection, FieldInfo as BaseFieldInfo, TableInfo,
 )
-from django.utils.functional import cached_property
 
 FieldInfo = namedtuple('FieldInfo', BaseFieldInfo._fields + ('is_autofield', 'is_json'))
 InfoLine = namedtuple('InfoLine', 'col_name data_type max_len num_prec num_scale extra column_default')
@@ -18,7 +17,7 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
         dmPython.DATE: 'DateField',
         dmPython.TIME: 'TimeField',
         dmPython.TIMESTAMP: 'DateTimeField',
-        dmPython.NUMBER: 'DecimalField',
+        dmPython.NUMBER: 'IntegerField',
         dmPython.BIGINT: 'BigIntegerField',
         dmPython.ROWID: 'BigIntegerField',
         dmPython.DOUBLE: 'FloatField',

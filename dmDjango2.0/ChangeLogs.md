@@ -1,8 +1,19 @@
 ## dmDjango
 
-Django是基于Python的Web应用程序框架，dmDjango是DM提供的Django连接DM数据库的驱动，当前版本为 `2.0.5` ，API详见安装目录下的 `《DM8_dmPython使用手册》` ，目前用于适配 `1.9` 及以上， `3.0` 及以下版本的Django。
+​		Django是基于Python的Web应用程序框架，dmDjango是DM提供的Django连接DM数据库的驱动，当前版本为 `2.0.7` ，API详见安装目录下的 `《DM8_dmPython使用手册》` ，目前用于适配 `1.9` 及以上， `3.0` 及以下版本的Django。
+
+​		dmDjango与Django版本并不存在一一对应的关系，2.0系列dmDjango适配1.9至3.0版本Django。
 
 ### ChangeLogs
+
+#### dmDjango v2.0.7(2025-12-1)
+
+* 修复了python2.7引入失败的问题
+
+#### dmDjango v2.0.6(2025-11-10)
+
+* 新增了创建连接时设置兼容模式参数
+* 修复了boolean类型数据在返回时存在如果输入时绑定参数为True（False）时，输出时错误转换的问题
 
 #### dmDjango v2.0.5(2025-09-26)
 

@@ -80,10 +80,10 @@ if distutils.command.bdist_wininst is not None:
     commandClasses["bdist_wininst"] = bdist_wininst
 
 setup(name='dmDjango',
-      version='2.0.5',
-      distclass = Distribution,
+      version='2.0.7',
+      distclass=Distribution,
       description='Dameng database backend for Django',
-      cmdclass = commandClasses,
+      cmdclass=commandClasses,
       author='Dameng',
       author_email='',
       url='',

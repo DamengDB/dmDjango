@@ -125,33 +125,6 @@ class SQLInsertCompiler(compiler.SQLInsertCompiler, SQLCompiler):
 
         return [(sql, params),]
 
-    def field_as_sql(self, field, val):
-        """
-        Take a field and a value intended to be saved on that field, and
-        return placeholder SQL and accompanying params. Checks for raw values,
-        expressions and fields with get_placeholder() defined in that order.
-
-        When field is None, the value is considered raw and is used as the
-        placeholder, with no corresponding parameters returned.
-        """
-        if field is None:
-            # A field value of None means the value is raw.
-            sql, params = val, []
-        elif hasattr(val, 'as_sql'):
-            # This is an expression, let's compile it.
-            sql, params = self.compile(val)
-        elif hasattr(field, 'get_placeholder'):
-            # Some fields (e.g. geo fields) need special munging before
-            # they can be inserted.
-            sql, params = field.get_placeholder(val, self, self.connection), [val]
-        else:
-            # Return the common case for the placeholder
-            sql, params = '?', [val]
-
-        params = self.connection.ops.modify_insert_params(sql, params)
-
-        return sql, params
-
 class SQLDeleteCompiler(compiler.SQLDeleteCompiler, SQLCompiler):
     pass
 
