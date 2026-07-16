@@ -1,15 +1,14 @@
 from __future__ import unicode_literals
 
-import django
 import datetime
 import re
 import uuid
+import json
 from functools import lru_cache
-
+from .extension import VERSION
 from django.conf import settings
-from django.db.backends.base.operations import BaseDatabaseOperations
-from django.db.backends.utils import truncate_name
 from django.utils import timezone
+from django.db.backends.base.operations import BaseDatabaseOperations
 from django.utils.functional import cached_property
 from django.utils.encoding import force_bytes, force_str
 
@@ -84,9 +83,9 @@ END;
         This is used by the 'db' cache backend to determine where to start
         culling.
         """
-        return 'SELECT cache_key FROM %s ORDER BY cache_key LIMIT 1 OFFSET %%s'
+        return 'SELECT ' + self.quote_name("cache_key") + ' FROM %s ORDER BY ' + self.quote_name("cache_key") + ' LIMIT 1 OFFSET %%s'
 
-    if django.VERSION>=(4,1):
+    if VERSION >= (4, 1):
         from django.utils.regex_helper import _lazy_re_compile
 
         _extract_format_re = _lazy_re_compile(r"[A-Z_]+")
@@ -113,7 +112,7 @@ END;
                 return f"EXTRACT({lookup_type} FROM {sql})", params
             return extract_sql, (*params, extract_param)
 
-    if django.VERSION<(4,1):
+    if VERSION < (4, 1):
         def date_extract_sql(self, lookup_type, field_name):
             """
             Given a lookup_type of 'year', 'month' or 'day', returns the SQL that
@@ -133,34 +132,25 @@ END;
                 return "EXTRACT(%s FROM %s)" % (lookup_type.upper(), field_name)
 
     def date_interval_sql(self, timedelta):
-        """
-        Implements the date interval functionality for expressions
-        """
-        minutes, seconds = divmod(timedelta.seconds, 60)
-        hours, minutes = divmod(minutes, 60)
-        days = str(timedelta.days)
-        day_precision = len(days)
-        fmt = "INTERVAL '%s %02d:%02d:%02d.%06d' DAY(%d) TO SECOND(6)"
-        return fmt % (days, hours, minutes, seconds, timedelta.microseconds,
-                day_precision), []
+        return self.connection.features.parse_module.date_interval_sql(timedelta)
 
     def return_insert_columns(self, fields):
-        if not fields:
-            return '', ()
-        field_names = []
-        params = []
-        for field in fields:
-            field_names.append('%s.%s' % (
-                self.quote_name(field.model._meta.db_table),
-                self.quote_name(field.column),
-            ))
-            params.append(InsertVar(field))
-        temp_str = 'RETURNING %s INTO %s' % (
-            ', '.join(field_names),
-            ', '.join(['%s'] * len(params)),
-        )
-        temp_str = temp_str.replace('%s', '?')
-        return temp_str, tuple(params)
+        return self.connection.features.parse_module.return_insert_columns(self, fields)
+
+    def returning_columns(self, fields):
+        return self.connection.features.parse_module.returning_columns(self, fields)
+
+    def fetch_returned_rows(self, cursor, returning_params):
+        if hasattr(cursor.cursor, 'has_returning') and cursor.cursor.has_returning is True:
+            pos_tup = cursor.cursor.pos_tup
+            returning_tup = cursor.cursor.returning_tup
+            result_lst = []
+            for i in pos_tup:
+                result_lst.append(returning_tup[i])
+
+            return [list(result_lst)]
+        else:
+            return [list(cursor.fetchone())]
 
     def fetch_returned_insert_columns(self, cursor, returning_params):
 
@@ -175,7 +165,7 @@ END;
         else:
             return cursor.fetchone()
 
-    if django.VERSION>=(4,1):
+    if VERSION >= (4, 1):
         def date_trunc_sql(self, lookup_type, sql, params, tzname=None):
             sql, params = self._convert_sql_to_tz(sql, params, tzname)
             trunc_param = None
@@ -189,7 +179,7 @@ END;
                 return f"TRUNC({sql})", params
             return f"TRUNC({sql}, %s)", (*params, trunc_param)
 
-    if django.VERSION<(4,1):
+    if VERSION < (4, 1):
         def date_trunc_sql(self, lookup_type, field_name):
             """
             Given a lookup_type of 'year', 'month' or 'day', returns the SQL that
@@ -215,27 +205,14 @@ END;
         return tzname    
 
     def _convert_field_to_tz(self, field_name, tzname):
-        if not settings.USE_TZ:
-            return field_name
-        if not self._tzname_re.match(tzname):
-            raise ValueError("Invalid time zone name: %s" % tzname)
-        # Convert from connection timezone to the local time, returning
-        # TIMESTAMP WITH TIME ZONE and cast it back to TIMESTAMP to strip the
-        # TIME ZONE details.
-        if self.connection.timezone_name != tzname:
-            return "CAST((FROM_TZ(%s, '%s') + CAST(TZ_OFFSET('%s') AS INTERVAL HOUR TO MINUTE)) AS TIMESTAMP)" % (
-                field_name,
-                self.connection.timezone_name,
-                self._prepare_tzname_delta(tzname),
-            )
-        return field_name      
+        return self.connection.features.parse_module._convert_field_to_tz(field_name, tzname)
 
-    if django.VERSION>=(4,1):
+    if VERSION >= (4, 1):
         def datetime_cast_date_sql(self, sql, params, tzname):
             sql, params = self._convert_sql_to_tz(sql, params, tzname)
             return f"TRUNC({sql})", params
 
-    if django.VERSION<(4,1):
+    if VERSION < (4, 1):
         def datetime_cast_date_sql(self, field_name, tzname):
             """
             Returns the SQL necessary to cast a datetime value to date value.
@@ -244,7 +221,7 @@ END;
             sql = 'TRUNC(%s)' % field_name
             return sql
 
-    if django.VERSION>=(4,1):
+    if VERSION >= (4, 1):
         def datetime_cast_time_sql(self, sql, params, tzname):
             # Since `TimeField` values are stored as TIMESTAMP change to the
             # default date and convert the field to the specified timezone.
@@ -258,18 +235,18 @@ END;
                 (*params, *params),
             )
 
-    if django.VERSION<(4,1):
+    if VERSION < (4, 1):
         def datetime_cast_time_sql(self, field_name, tzname):
             # Since `TimeField` values are stored as TIMESTAMP where only the date
             # part is ignored, convert the field to the specified timezone.
             return self._convert_field_to_tz(field_name, tzname)
 
-    if django.VERSION>=(4, 1):
+    if VERSION >= (4, 1):
         def datetime_extract_sql(self, lookup_type, sql, params, tzname):
             sql, params = self._convert_sql_to_tz(sql, params, tzname)
             return self.date_extract_sql(lookup_type, sql, params)
 
-    if django.VERSION<(4,1):
+    if VERSION < (4, 1):
         def datetime_extract_sql(self, lookup_type, field_name, tzname):
             """
             Given a lookup_type of 'year', 'month', 'day', 'hour', 'minute' or
@@ -280,7 +257,7 @@ END;
             sql = self.date_extract_sql(lookup_type, field_name)
             return sql
 
-    if django.VERSION >= (4,1):
+    if VERSION >= (4, 1):
         def datetime_trunc_sql(self, lookup_type,sql, params, tzname):
             sql, params = self._convert_sql_to_tz(sql, params, tzname)
             trunc_param = None
@@ -300,7 +277,7 @@ END;
                 return f"CAST({sql} AS DATETIME)", params
             return f"TRUNC({sql}, %s)", (*params, trunc_param)
 
-    if django.VERSION >= (4, 1):
+    if VERSION >= (4, 1):
         def time_trunc_sql(self, lookup_type, sql, params, tzname=None):
             # The implementation is similar to `datetime_trunc_sql` as both
             # `DateTimeField` and `TimeField` are stored as TIMESTAMP where
@@ -315,7 +292,7 @@ END;
                 return f"CAST({sql} AS DATETIME)", params
             return f"TRUNC({sql}, %s)", (*params, trunc_param)
 
-    if django.VERSION >= (4, 1):
+    if VERSION >= (4, 1):
         def _convert_sql_to_tz(self, sql, params, tzname):
             if not (settings.USE_TZ and tzname):
                 return sql, params
@@ -334,7 +311,7 @@ END;
                 )
             return sql, params
 
-    if django.VERSION < (4,1):
+    if VERSION < (4, 1):
         def datetime_trunc_sql(self, lookup_type, field_name, tzname):
             field_name = self._convert_field_to_tz(field_name, tzname)
             if lookup_type in ('year', 'month'):
@@ -351,11 +328,8 @@ END;
                 sql = "CAST(%s AS DATETIME)" % field_name
             return sql
 
-    if django.VERSION < (4, 1):
+    if VERSION < (4, 1):
         def time_trunc_sql(self, lookup_type, field_name):
-            # The implementation is similar to `datetime_trunc_sql` as both
-            # `DateTimeField` and `TimeField` are stored as TIMESTAMP where
-            # the date part of the later is ignored.
             if lookup_type == 'hour':
                 sql = "TRUNC(%s, 'HH24')" % field_name
             elif lookup_type == 'minute':
@@ -363,6 +337,9 @@ END;
             elif lookup_type == 'second':
                 sql = "CAST(%s AS TIME)" % field_name  # Cast to TIME removes sub-second precision.
             return sql
+
+    def adapt_json_value(self, value, encoder):
+        return json.dumps(value, ensure_ascii=False, cls=encoder)
 
     def deferrable_sql(self):
         """
@@ -425,7 +402,7 @@ END;
             query = 'select %s from %s where rowid = ?' % (self.quote_name(pk_name), self.quote_name(table_name),)
             cursor.execute(query, (cursor.lastrowid,))
         else:
-            cursor.execute('SELECT MAX(%s) from %s' % (self.quote_name(pk_name), self.quote_name(table_name)))
+            cursor.execute("SELECT IDENT_CURRENT(?)", (table_name.upper(),))
             
         value = cursor.fetchone()[0]
         return value
@@ -463,14 +440,10 @@ END;
         Returns the value to use for the LIMIT when we are wanting "LIMIT
         infinity". Returns None if the limit clause can be omitted in this case.
         """
-        return 2147483647
+        return 9223372036854775807
     
     def limit_offset_sql(self, low_mark, high_mark):
-        fetch, offset = self._get_limit_offset_params(low_mark, high_mark)
-        return ' '.join(sql for sql in (
-            ('OFFSET %d ROWS' % offset) if offset else None,
-            ('FETCH FIRST %d ROWS ONLY' % fetch) if fetch else None,
-        ) if sql)    
+        return self.connection.features.parse_module.limit_offset_sql(self, low_mark, high_mark)
 
     def pk_default_value(self):
         """
@@ -502,15 +475,13 @@ END;
         return "RETURNING %s INTO ?", (InsertIdVar(),)
 
     def quote_name(self, name):
-        """
-        Returns a quoted version of the given table, index or column name. Does
-        not quote the given name if it's already been quoted.
-        """    
-        if not name.startswith('"') or not name.endswith('"'):
-            name = name.replace('\"', '\"\"')
-            name = '"%s"' % truncate_name(name.upper(), self.max_name_length())
-                    
-        return name.upper()
+        return self.connection.features.parse_module.quote_name(name)
+    
+    def dm_quote_name(self, name):
+        if not (name.startswith('"') and name.endswith('"')):
+            name = name.replace('"', '""')
+            name = '"%s"' % truncate_name(name.upper(), 128)
+        return name
 
     def random_function_sql(self):
         """
@@ -534,25 +505,17 @@ END;
         return 'REGEXP_LIKE(%%s, %%s, %s)' % match_option
 
     def savepoint_create_sql(self, sid):
-        """
-        Returns the SQL for starting a new savepoint. Only required if the
-        "uses_savepoints" feature is True. The "sid" parameter is a string
-        for the savepoint id.
-        """
         return convert_unicode("SAVEPOINT " + self.quote_name(sid))    
 
     def savepoint_rollback_sql(self, sid):
-        """
-        Returns the SQL for rolling back the given savepoint.
-        """
         return convert_unicode("ROLLBACK TO SAVEPOINT " + self.quote_name(sid))
     
     def savepoint_commit_sql(self, sid):
-        """
-        Return the SQL for committing the given savepoint.
-        """
-        return convert_unicode("RELEASE_SAVEPOINT('%s') " % self.quote_name(sid))
-    
+        return convert_unicode("RELEASE SAVEPOINT " + self.quote_name(sid))
+
+    def format_for_duration_arithmetic(self, sql):
+        return "NUMTODSINTERVAL(%s / 1000000, 'SECOND')" % sql
+
     def _get_django_constraints(self, tables):
         
         if not isinstance(tables, list) :
@@ -614,51 +577,8 @@ END;
         return lru_cache(maxsize=512)(self.__foreign_key_constraints)    
 
     def sql_flush(self, style, tables, *, reset_sequences=False, allow_cascade=False):
-        if not tables:
-            return []
-        
-        truncated_tables = {table.upper() for table in tables}
-        constraints = set()
+        return self.connection.features.parse_module.sql_flush(db_op=self, style=style, tables=tables, reset_sequences=reset_sequences, allow_cascade=allow_cascade)
 
-        for table in tables:
-            for foreign_table, constraint in self._foreign_key_constraints(table, recursive=allow_cascade):
-                if allow_cascade:
-                    truncated_tables.add(foreign_table)
-                constraints.add((foreign_table, constraint))
-        sql = [
-            '%s %s %s %s %s %s;' % (
-                style.SQL_KEYWORD('ALTER'),
-                style.SQL_KEYWORD('TABLE'),
-                style.SQL_FIELD(self.quote_name(table)),
-                style.SQL_KEYWORD('DISABLE'),
-                style.SQL_KEYWORD('CONSTRAINT'),
-                style.SQL_FIELD(self.quote_name(constraint)),
-            ) for table, constraint in constraints
-        ] + [
-            '%s %s %s;' % (
-                style.SQL_KEYWORD('TRUNCATE'),
-                style.SQL_KEYWORD('TABLE'),
-                style.SQL_FIELD(self.quote_name(table)),
-            ) for table in truncated_tables
-        ] + [
-            '%s %s %s %s %s %s;' % (
-                style.SQL_KEYWORD('ALTER'),
-                style.SQL_KEYWORD('TABLE'),
-                style.SQL_FIELD(self.quote_name(table)),
-                style.SQL_KEYWORD('ENABLE'),
-                style.SQL_KEYWORD('CONSTRAINT'),
-                style.SQL_FIELD(self.quote_name(constraint)),
-            ) for table, constraint in constraints
-        ]
-            
-        if reset_sequences:
-            sequences = [
-                sequence
-                for sequence in self.connection.introspection.sequence_list()
-                if sequence['table'].upper() in truncated_tables
-            ]
-        return sql
-    
     def _get_no_autofield_sequence_name(self, table):
 
         name_length = self.max_name_length() - 3

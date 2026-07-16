@@ -3,20 +3,8 @@ Dameng database backend for Django.
 """
 from __future__ import unicode_literals
 
-import datetime
-import decimal
-import os
-import platform
-import sys
-import warnings
-
-import django.db.backends.utils
-from django.conf import settings
-from django.db import utils
+from .extension import DMTSQLDialect_Adapter, DMMySQLDialect_Adapter
 from django.db.backends.base.base import BaseDatabaseWrapper
-from django.db.backends.base.validation import BaseDatabaseValidation
-from django.utils.duration import duration_string
-from django.utils.encoding import force_bytes, force_str
 from django.utils.functional import cached_property
 from django.utils.asyncio import async_unsafe
 from django.utils.regex_helper import _lazy_re_compile
@@ -35,14 +23,13 @@ from .features import DatabaseFeatures                  # isort:skip
 from .introspection import DatabaseIntrospection        # isort:skip
 from .operations import DatabaseOperations              # isort:skip
 from .schema import DatabaseSchemaEditor                # isort:skip
-from .utils import convert_unicode, InsertVar           # isort:skip
 from .validation import DatabaseValidation              # isort:skip
 
 DatabaseError = Database.DatabaseError
 IntegrityError = Database.IntegrityError   
 
 class DatabaseWrapper(BaseDatabaseWrapper):
-    vendor = 'Dameng'
+    vendor = 'dameng'
     display_name = 'DM'
     
     data_types = {
@@ -54,7 +41,7 @@ class DatabaseWrapper(BaseDatabaseWrapper):
         'CharField': 'NVARCHAR2(%(max_length)s)',
         'CommaSeparatedIntegerField': 'VARCHAR(%(max_length)s)',
         'DateField': 'DATE',
-        'DateTimeField': 'TIMESTAMP',
+        'DateTimeField': 'TIMESTAMP(6)',
         'DecimalField': 'NUMBER(%(max_digits)s, %(decimal_places)s)',
         'DurationField': 'INTERVAL DAY(9) TO SECOND(6)',
         'FileField': 'NVARCHAR2(%(max_length)s)',
@@ -72,7 +59,7 @@ class DatabaseWrapper(BaseDatabaseWrapper):
         'SlugField': 'NVARCHAR2(%(max_length)s)',
         'SmallIntegerField': 'SMALLINT',
         'TextField': 'TEXT',
-        'TimeField': 'TIMESTAMP',
+        'TimeField': 'TIMESTAMP(6)',
         'URLField': 'VARCHAR(%(max_length)s)',
         'UUIDField': 'VARCHAR(32)',
         'JSONField': 'JSON',
@@ -89,33 +76,7 @@ class DatabaseWrapper(BaseDatabaseWrapper):
     }
     
     # DM doesn't support a database index on these columns.
-    _limited_data_types = ('clob', 'nclob', 'blob', 'text')    
-
-    operators = {
-        'exact': '= %s',
-        'iexact': '= UPPER(%s)',
-        'contains': "LIKE %s ESCAPE '\\'",
-        'icontains': "LIKE UPPER(%s) ESCAPE '\\'",
-        'gt': '> %s',
-        'gte': '>= %s',
-        'lt': '< %s',
-        'lte': '<= %s',
-        'startswith': "LIKE %s ESCAPE '\\'",
-        'endswith': "LIKE %s ESCAPE '\\'",
-        'istartswith': "LIKE UPPER(%s) ESCAPE '\\'",
-        'iendswith': "LIKE UPPER(%s) ESCAPE '\\'",
-    }
-    
-    pattern_esc = r"REPLACE(REPLACE(REPLACE({}, '\', '\\'), '%', '\%'), '_', '\_')"
-    
-    pattern_ops = {
-        'contains': r"LIKE '%' || {} || '%' ESCAPE '\'",
-        'icontains': r"LIKE '%' || UPPER({}) || '%' ESCAPE '\'",
-        'startswith': r"LIKE {} || '%' ESCAPE '\'",
-        'istartswith': r"LIKE UPPER({}) || '%%' ESCAPE '\'",
-        'endswith': r"LIKE '%' || {} ESCAPE '\'",
-        'iendswith': r"LIKE '%' || UPPER({}) ESCAPE '\'",
-    }
+    _limited_data_types = ('clob', 'nclob', 'blob', 'text')
 
     Database = Database
     SchemaEditorClass = DatabaseSchemaEditor
@@ -139,16 +100,23 @@ class DatabaseWrapper(BaseDatabaseWrapper):
     def get_connection_params(self):        
         conn_params = self.settings_dict['OPTIONS'].copy()        
         return conn_params
-    
+
+    def _get_dict_value(self, settings_dict, key_name, default_value):
+        dict_name = settings_dict[key_name]
+        if dict_name != '' and dict_name is not None:
+            return dict_name.strip()
+        else:
+            return default_value
+
     def _connect_string(self):
         settings_dict = self.settings_dict            
-        user = settings_dict['OPTIONS'].get('user', settings_dict['USER'].strip())
-        passwd = settings_dict['OPTIONS'].get('passwd', settings_dict['PASSWORD'].strip())
-        host = settings_dict['OPTIONS'].get('host', settings_dict['HOST'].strip())
-        port = settings_dict['OPTIONS'].get('port', settings_dict['PORT'].strip())        
+        user = self._get_dict_value(settings_dict, 'USER', 'SYSDBA')
+        passwd = self._get_dict_value(settings_dict, 'PASSWORD', '')
+        host = self._get_dict_value(settings_dict, 'HOST', 'localhost')
+        port = self._get_dict_value(settings_dict, 'PORT', 5236)
         mpp_type = settings_dict['OPTIONS'].get('mpp_type', {}).get('mpp_type')
         ssl_path = settings_dict['OPTIONS'].get('ssl_path', {}).get('ssl_path')
-        ssl_pwd = settings_dict['OPTIONS'].get('ssl_pwd', {}).get('ssl_pwd')            
+        ssl_pwd = settings_dict['OPTIONS'].get('ssl_pwd', {}).get('ssl_pwd')
         
         if mpp_type:
             if port is None or port == "":
@@ -167,17 +135,17 @@ class DatabaseWrapper(BaseDatabaseWrapper):
         if ssl_pwd:
             conn_string += '@%s' % (ssl_pwd) 
         
-        return conn_string        
-    
+        return conn_string
+
     def _connect_params(self):
-        settings_dict = self.settings_dict            
-        user = settings_dict['OPTIONS'].get('user', settings_dict['USER'].strip())
-        passwd = settings_dict['OPTIONS'].get('passwd', settings_dict['PASSWORD'].strip())
-        host = settings_dict['OPTIONS'].get('host', settings_dict['HOST'].strip())
-        port = settings_dict['OPTIONS'].get('port', settings_dict['PORT'].strip())        
+        settings_dict = self.settings_dict
+        user = self._get_dict_value(settings_dict, 'USER', 'SYSDBA')
+        passwd = self._get_dict_value(settings_dict, 'PASSWORD', '')
+        host = self._get_dict_value(settings_dict, 'HOST', 'localhost')
+        port = self._get_dict_value(settings_dict, 'PORT', 5236)
         mpp_type = settings_dict['OPTIONS'].get('mpp_type', {}).get('mpp_type')
         ssl_path = settings_dict['OPTIONS'].get('ssl_path', {}).get('ssl_path')
-        ssl_pwd = settings_dict['OPTIONS'].get('ssl_pwd', {}).get('ssl_pwd')            
+        ssl_pwd = settings_dict['OPTIONS'].get('ssl_pwd', {}).get('ssl_pwd')
         
         conn_param = {}
         conn_param['user'] = user
@@ -196,7 +164,7 @@ class DatabaseWrapper(BaseDatabaseWrapper):
             
         if mpp_type:
             conn_param['mpp_login'] = mpp_type
-        
+
         return conn_param    
     
     @async_unsafe
@@ -209,6 +177,7 @@ class DatabaseWrapper(BaseDatabaseWrapper):
                 del conn_params['empty_string_as_null']
             else:
                 raise ValueError("The empty_string_as_null must be of bool type")
+
         if 'compatible_mode' in conn_params:
             if type(conn_params['compatible_mode']) is int:
                 self.features.compatible_mode = conn_params['compatible_mode']
@@ -218,6 +187,39 @@ class DatabaseWrapper(BaseDatabaseWrapper):
                                  "the following compatibility modes:\n"
                                  "            0:none, 1:SQL92, 2:Oracle, 3:MS SQL Server, "
                                  "4:MySQL, 5:DM6, 6:Teradata, 7:PG, 8:DB2")
+
+        if 'parse_type' in conn_params:
+            if type(conn_params['parse_type']) is str:
+                parse_type = conn_params['parse_type'].upper()
+                if parse_type in ['DM', 'TSQL', 'MYSQL']:
+                    if parse_type == 'TSQL':
+                        self.features.parse_module = DMTSQLDialect_Adapter()
+                    elif parse_type == 'MYSQL':
+                        self.data_types['SmallAutoField'] = 'INTEGER AUTO_INCREMENT'
+                        self.data_types['AutoField'] = 'INTEGER AUTO_INCREMENT'
+                        self.data_types['BigAutoField'] = 'BIGINT AUTO_INCREMENT'
+                        self.data_types['DurationField'] = 'BIGINT'
+                        self.data_types['DateTimeField'] = 'DATETIME(6)'
+                        self.data_types['TimeField'] = 'DATETIME(6)'
+                        if 'JSONField' in self.data_type_check_constraints:
+                            del self.data_type_check_constraints['JSONField']
+                        self.SchemaEditorClass.sql_create_fk = self.features.parse_module.sql_create_fk
+                        self.features.can_return_columns_from_insert = False
+                        self.features.parse_module = DMMySQLDialect_Adapter()
+                        self.features.has_native_duration_field = False
+                        self.features.allows_auto_pk_0 = False
+                        self.features.supports_order_by_nulls_modifier = False
+                        self.features.has_select_for_update = False
+                        self.features.has_select_for_update_of = False
+                else:
+                    raise ValueError("The parameter parse_type can only be set to one of DM, TSQL or MySQL")
+            else:
+                raise ValueError("The parameter parse_type can only be set to string type")
+
+        self.operators = self.features.parse_module.operators
+        self.pattern_esc = self.features.parse_module.pattern_esc
+        self.pattern_ops = self.features.parse_module.pattern_ops
+
         try:
             return Database.connect(user=params['user'],
                                 password=params['password'],
@@ -239,18 +241,14 @@ class DatabaseWrapper(BaseDatabaseWrapper):
         
     def create_cursor(self, name=None):
         cursor = self.connection.cursor()
-        return CursorWrapper(cursor)   
+        return CursorWrapper(self.features.parse_module,cursor)
     
     def _set_autocommit(self, autocommit):
         with self.wrap_database_errors:
             self.connection.autoCommit = autocommit
     
     def disable_constraint_checking(self):
-        """
-        Disable foreign key checks, primarily for use in adding rows with
-        forward references. Always return True to indicate constraint checks
-        need to be re-enabled.
-        """
+
         tables = self.introspection.django_table_names(only_existing=True, include_views=False)
         
         if not tables:
@@ -260,29 +258,14 @@ class DatabaseWrapper(BaseDatabaseWrapper):
         
         for foreign_table, constraint in self.ops._get_django_constraints(tables):
             constraints.add((foreign_table, constraint)) 
-        
+
         sqls = [
             'ALTER TABLE /*+ALTER_TAB_COMMIT(0)*/ %s DISABLE CONSTRAINT %s;' % (
                 self.ops.quote_name(table),
                 self.ops.quote_name(constraint),
             ) for table, constraint in constraints
         ]
-        
-        auto_tran_sql = """
-        DECLARE
-            PRAGMA AUTONOMOUS_TRANSACTION;
-        BEGIN
-        
-        """;
-        
-        for sql in sqls:
-            auto_tran_sql = auto_tran_sql + "EXECUTE IMMEDIATE '%s';\n" % (sql)
-        
-        auto_tran_sql = auto_tran_sql + """
-            COMMIT;
-        END;
-        """
-        
+
         with self.cursor() as cursor:
             for sql in sqls:
                 cursor.execute(sql)
@@ -327,7 +310,7 @@ class DatabaseWrapper(BaseDatabaseWrapper):
         checking (e.g. via "SET CONSTRAINTS ALL IMMEDIATE"). Should raise an
         IntegrityError if any invalid foreign key references are encountered.
         """
-        self.enable_constraint_checking()    
+        self.enable_constraint_checking()
 
     def is_usable(self):
         try:
@@ -352,51 +335,36 @@ class DatabaseWrapper(BaseDatabaseWrapper):
 
 
 FORMAT_QMARK_REGEX = _lazy_re_compile(r'(?<!%)%s')
-    
+PYFORMAT_QMARK_REGEX = _lazy_re_compile(r'%\((\w+)\)s')
+
 class CursorWrapper(object):
         
     codes_for_integrityerror = (1048,)
 
-    def __init__(self, cursor):
+    def __init__(self, parse_module, cursor):
+        self.parse_module = parse_module
         self.cursor = cursor
     
     def convert_query(self, query):
         return FORMAT_QMARK_REGEX.sub('?', query).replace('%%', '%')
-    
+
+    def convert_query_dict_args(self, query):
+        return PYFORMAT_QMARK_REGEX.sub(r':\1', query).replace('%%', '%')
+
     def execute(self, query, args=None):
         try:
             # args is None means no string interpolation
             try:
                 if args is None:
                     return self.cursor.execute(query, args)
-                
-                args_temp = []
-                pos_list = []
-                has_returning = False
-                if type(args) is tuple or list:
-                    for i in range(len(args)):
-                        if isinstance(args[i], InsertVar):
-                            args_temp.append(None)
-                            has_returning = True
-                            pos_list.append(i)
-                        else:
-                            args_temp.append(args[i])
-
-                args = tuple(args_temp)
-                
-                query = self.convert_query(query)
-                result = self.cursor.execute(query, args)
-                if has_returning:
-                    self.returning_tup = tuple(result)
-                    self.has_returning = has_returning
-                    self.pos_tup = tuple(pos_list)
-                return result
+                else:
+                    return self.parse_module.do_execute(self, query, args)
             except Database.DatabaseError as e:
                 if hasattr(e.args[0], "code") == False:
                     raise
                 
                 if e.args[0].code == -6407 or e.args[0].code == -7116:
-                    self.cursor.execute(query, args)
+                    return self.cursor.execute(query, args)
                 elif e.args[0].code == -6105:
                     raise
                 else:
@@ -427,6 +395,7 @@ class CursorWrapper(object):
 
         try:
             query = self.convert_query(query)
+            query = self.convert_query_dict_args(query)
             return self.cursor.executemany(query, args)
         except Database.OperationalError as e:
             # Map some error codes to IntegrityError, since they seem to be

@@ -1,32 +1,13 @@
-import binascii
-import copy
 import datetime
-import re
-import django
-from django.db.backends.base.schema import BaseDatabaseSchemaEditor
-from django.db.utils import DatabaseError
+from .extension import VERSION
 from django.db.models import NOT_PROVIDED
+from django.db.backends.base.schema import BaseDatabaseSchemaEditor
 
 class DatabaseSchemaEditor(BaseDatabaseSchemaEditor):
-    """
-    This class (and its subclasses) are responsible for emitting schema-changing
-    statements to the databases - model creation/removal/alteration, field
-    renaming, index fiddling, and so on.
-
-    It is intended to eventually completely replace DatabaseCreation.
-
-    This class should be used by creating an instance for each set of schema
-    changes (e.g. a migration file), and by first calling start(),
-    then the relevant actions, and then commit(). This is necessary to allow
-    things like circular foreign key references - FKs will only be created once
-    commit() is called.
-    """
-
     sql_alter_column_type = "MODIFY %(column)s %(type)s"
     sql_alter_column_null = "MODIFY %(column)s NULL"
     sql_alter_column_not_null = "MODIFY %(column)s NOT NULL"
     sql_alter_column_default = "ALTER COLUMN %(column)s SET DEFAULT %(default)s"
-
     sql_create_index = "CREATE INDEX %(name)s ON %(table)s (%(columns)s)%(extra)s"  
 
     def quote_value(self, value):
@@ -41,7 +22,7 @@ class DatabaseSchemaEditor(BaseDatabaseSchemaEditor):
             return "'%s'" % value
         
         elif isinstance(value, str):
-            return "'%s'" % value.replace("\'", "\'\'").replace('%', '%%')
+            return "'%s'" % value.replace("'", "''").replace("%", "%%")
         elif isinstance(value, (bytes, bytearray, memoryview)):
             return "'%s'" % value.hex()
         
@@ -55,7 +36,7 @@ class DatabaseSchemaEditor(BaseDatabaseSchemaEditor):
         Keep the NULL and DEFAULT properties of the old field. If it has
         changed, it will be handled separately.
         """
-        if django.VERSION > (5, 0):
+        if VERSION > (5, 0):
             if field.db_default is not NOT_PROVIDED:
                 default_sql, params = self.db_default_sql(field)
                 default_sql %= tuple(self.quote_value(p) for p in params)
@@ -66,14 +47,13 @@ class DatabaseSchemaEditor(BaseDatabaseSchemaEditor):
             new_type += " NOT NULL"
         return new_type
 
-            
     def prepare_default(self, value):
         """
         Only used for backends which have requires_literal_defaults feature
         """
         return self.quote_value(value)
     
-    if django.VERSION >= (4, 2):    
+    if VERSION >= (4, 2):    
         def _alter_column_type_sql(self, model, old_field, new_field, new_type, old_collation, new_collation):
             
             new_type = self._set_field_new_type(old_field, new_type)
@@ -102,6 +82,4 @@ class DatabaseSchemaEditor(BaseDatabaseSchemaEditor):
         db_type = field.db_type(self.connection)
         if db_type is not None and db_type.lower() in self.connection._limited_data_types:
             return False
-        return create_index    
-
-        
+        return create_index

@@ -16,7 +16,7 @@ from django.db.backends.utils import truncate_name
 if django.VERSION < (3, 0):
     from django.utils import six
 from django.utils import timezone
-from django.utils.encoding import force_bytes, force_text
+from django.utils.encoding import force_bytes, force_text, force_str
 
 from .base import Database
 from .utils import InsertIdVar, convert_unicode
@@ -94,16 +94,7 @@ class DatabaseOperations(BaseDatabaseOperations):
             return "EXTRACT(%s FROM %s)" % (lookup_type.upper(), field_name)
 
     def date_interval_sql(self, timedelta):
-        """
-        Implements the date interval functionality for expressions
-        """
-        minutes, seconds = divmod(timedelta.seconds, 60)
-        hours, minutes = divmod(minutes, 60)
-        days = str(timedelta.days)
-        day_precision = len(days)
-        fmt = "INTERVAL '%s %02d:%02d:%02d.%06d' DAY(%d) TO SECOND(6)"
-        return fmt % (days, hours, minutes, seconds, timedelta.microseconds,
-                day_precision), []
+        return self.connection.features.parse_module.date_interval_sql(timedelta)
 
     def date_trunc_sql(self, lookup_type, field_name):
         """
@@ -115,18 +106,9 @@ class DatabaseOperations(BaseDatabaseOperations):
             return "TRUNC(%s, '%s')" % (field_name, lookup_type.upper())
         else:
             return "TRUNC(%s)" % field_name
-        
-    _tzname_re = re.compile(r'^[\w/:+-]+$')
 
     def _convert_field_to_tz(self, field_name, tzname):
-        if not settings.USE_TZ:
-            return field_name
-        if not self._tzname_re.match(tzname):
-            raise ValueError("Invalid time zone name: %s" % tzname)
-        result = "(FROM_TZ(%s, '0:00') AT TIME ZONE '%s')" % (field_name, tzname)
-        result = "TO_CHAR(%s, 'YYYY-MM-DD HH24:MI:SS')" % result
-        result = "TO_DATE(%s, 'YYYY-MM-DD HH24:MI:SS')" % result
-        return "CAST(%s AS TIMESTAMP)" % result        
+        return self.connection.features.parse_module._convert_field_to_tz(field_name, tzname)
 
     def datetime_cast_date_sql(self, field_name, tzname):
         """
@@ -240,8 +222,14 @@ class DatabaseOperations(BaseDatabaseOperations):
         This method also receives the table name and the name of the primary-key
         column.
         """
-        cursor.execute('SELECT MAX(%s) from %s' %(self.quote_name(pk_name), self.quote_name(table_name)))
-        return cursor.fetchone()[0]
+        if cursor.lastrowid is not None:
+            query = 'select %s from %s where rowid = ?' % (self.quote_name(pk_name), self.quote_name(table_name),)
+            cursor.execute(query, (cursor.lastrowid,))
+        else:
+            cursor.execute("SELECT IDENT_CURRENT(?)", (table_name.upper(),))
+
+        value = cursor.fetchone()[0]
+        return value
 
     def lookup_cast(self, lookup_type, internal_type=None):
         """
@@ -304,15 +292,7 @@ class DatabaseOperations(BaseDatabaseOperations):
         return "RETURNING %s INTO ?", (InsertIdVar(),)
 
     def quote_name(self, name):
-        """
-        Returns a quoted version of the given table, index or column name. Does
-        not quote the given name if it's already been quoted.
-        """    
-        if not name.startswith('"') or not name.endswith('"'):
-            name = name.replace('"', '""')
-            name = '"%s"' % truncate_name(name.upper(), self.max_name_length())
-
-        return name
+        return self.connection.features.parse_module.quote_name(name)
 
     def random_function_sql(self):
         """
@@ -336,24 +316,16 @@ class DatabaseOperations(BaseDatabaseOperations):
         return 'REGEXP_LIKE(%%s, %%s, %s)' % match_option
 
     def savepoint_create_sql(self, sid):
-        """
-        Returns the SQL for starting a new savepoint. Only required if the
-        "uses_savepoints" feature is True. The "sid" parameter is a string
-        for the savepoint id.
-        """
         return convert_unicode("SAVEPOINT " + self.quote_name(sid))    
 
     def savepoint_rollback_sql(self, sid):
-        """
-        Returns the SQL for rolling back the given savepoint.
-        """
         return convert_unicode("ROLLBACK TO SAVEPOINT " + self.quote_name(sid))
     
     def savepoint_commit_sql(self, sid):
-        """
-        Return the SQL for committing the given savepoint.
-        """
-        return convert_unicode("RELEASE_SAVEPOINT('%s') " % self.quote_name(sid))
+        return convert_unicode("RELEASE SAVEPOINT %s " % self.quote_name(sid))
+
+    def format_for_duration_arithmetic(self, sql):
+        return "NUMTODSINTERVAL(%s / 1000000, 'SECOND')" % sql
 
     def __foreign_key_constraints(self, table_name, recursive):
         with self.connection.cursor() as cursor:
@@ -389,46 +361,7 @@ class DatabaseOperations(BaseDatabaseOperations):
         return lru_cache(maxsize=512)(self.__foreign_key_constraints)
 
     def sql_flush(self, style, tables, sequences, allow_cascade=False):
-        if not tables:
-            return []
-
-        truncated_tables = {table.upper() for table in tables}
-        constraints = set()
-
-        for table in tables:
-            for foreign_table, constraint in self._foreign_key_constraints(table, recursive=allow_cascade):
-                if allow_cascade:
-                    truncated_tables.add(foreign_table)
-                constraints.add((foreign_table, constraint))
-        sql = [
-                  '%s %s %s %s %s %s;' % (
-                      style.SQL_KEYWORD('ALTER'),
-                      style.SQL_KEYWORD('TABLE'),
-                      style.SQL_FIELD(self.quote_name(table)),
-                      style.SQL_KEYWORD('DISABLE'),
-                      style.SQL_KEYWORD('CONSTRAINT'),
-                      style.SQL_FIELD(self.quote_name(constraint)),
-                  ) for table, constraint in constraints
-              ] + [
-                  '%s %s %s;' % (
-                      style.SQL_KEYWORD('TRUNCATE'),
-                      style.SQL_KEYWORD('TABLE'),
-                      style.SQL_FIELD(self.quote_name(table)),
-                  ) for table in truncated_tables
-              ] + [
-                  '%s %s %s %s %s %s;' % (
-                      style.SQL_KEYWORD('ALTER'),
-                      style.SQL_KEYWORD('TABLE'),
-                      style.SQL_FIELD(self.quote_name(table)),
-                      style.SQL_KEYWORD('ENABLE'),
-                      style.SQL_KEYWORD('CONSTRAINT'),
-                      style.SQL_FIELD(self.quote_name(constraint)),
-                  ) for table, constraint in constraints
-              ]
-
-        sql.extend(self.sequence_reset_by_name_sql(style, sequences))
-
-        return sql
+        return self.connection.features.parse_module.sql_flush(self, style, tables, sequences, allow_cascade)
 
     def strip_quotes(self, table_name):
         has_quotes = table_name.startswith('"') and table_name.endswith('"')
@@ -488,9 +421,9 @@ class DatabaseOperations(BaseDatabaseOperations):
             else:
                 raise ValueError("Dameng does not support timezone-aware datetimes when USE_TZ is False.")
 
-        if django.VERSION<(3,0):
+        if django.VERSION < (3, 0):
             return six.text_type(value)
-        if django.VERSION>=(3,0):
+        if django.VERSION >= (3, 0):
             return str(value)
 
     def adapt_timefield_value(self, value):

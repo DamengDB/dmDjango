@@ -7,24 +7,36 @@ except ImportError:
     from itertools import izip_longest as zip_longest
 import django
 from django.db.models.sql import compiler
-from django.db.models.fields.json import KeyTransform, KeyTransformExact, KeyTransformIsNull
+from django.db.models.fields.json import KeyTransform, KeyTransformExact, KeyTransformIsNull, JSONField
 from django.db.models.fields.json import HasAnyKeys, HasKey, HasKeys, DataContains, ContainedBy
 from django.db.models.expressions import Exists
 from django.db.models.lookups import Exact
-from django.db.models.fields.json import compile_json_path
 
 from django.core.exceptions import EmptyResultSet, FieldError
 from django.db import DatabaseError, NotSupportedError
 from django.db.models.expressions import F, OrderBy, RawSQL, Ref, Value
-if django.VERSION>=(3,2):
+if django.VERSION >= (3, 2):
     from django.db.models.functions.math import Random
-if django.VERSION<(3,2):
+if django.VERSION < (3, 2):
     from django.db.models.expressions import Random
 from django.db.models.functions import Cast
 
 from django.db.models.sql.constants import ORDER_DIR
 from django.db.models.sql.query import get_order_dir
 from django.utils.hashable import make_hashable
+from .extension import ADAPT_JSON_VALUE
+
+def compile_json_path(key_transforms, include_root=True):
+    path = ['$'] if include_root else []
+    for key_transform in key_transforms:
+        try:
+            num = int(key_transform)
+        except ValueError:  # non-integer
+            path.append('.')
+            path.append(json.dumps(key_transform.replace("'", "''")))
+        else:
+            path.append('[%s]' % num)
+    return ''.join(path)
 
 class SQLCompiler(compiler.SQLCompiler):
     def compile(self, node, select_format=False):
@@ -50,18 +62,30 @@ class SQLCompiler(compiler.SQLCompiler):
 
             params = temp_params
         elif isinstance(node, KeyTransformIsNull):
+            if django.VERSION > (5, 1, 3):
+                template = 'JSON_QUERY(%s, %s WITH WRAPPER) IS NOT NULL'
+            else:
+                template = 'JSON_QUERY(%s, %%s WITH WRAPPER) IS NOT NULL'
             sql, params = HasKey(
                 node.lhs.lhs,
                 node.lhs.key_name,
-            ).as_sql(self, self.connection, template='JSON_QUERY(%s, %%s WITH WRAPPER) IS NOT NULL')
+            ).as_sql(self, self.connection, template=template)
             if not node.rhs:
                 return sql, params
             lhs, lhs_params, _ = node.lhs.preprocess_lhs(self, self.connection)
             return '(NOT %s OR %s IS NULL)' % (sql, lhs), tuple(params) + tuple(lhs_params)            
         elif isinstance(node, HasAnyKeys):
-            sql, params = node.as_sql(self, self.connection, template='JSON_VALUE(%s, %%s) IS NOT NULL')
+            if django.VERSION > (5, 1, 3):
+                template = 'JSON_VALUE(%s, %s) IS NOT NULL'
+            else:
+                template = 'JSON_VALUE(%s, %%s) IS NOT NULL'
+            sql, params = node.as_sql(self, self.connection, template=template)
         elif isinstance(node, HasKey) or isinstance(node, HasKeys):
-            sql, params = node.as_sql(self, self.connection, template='JSON_QUERY(%s, %%s WITH WRAPPER) IS NOT NULL')
+            if django.VERSION > (5, 1, 3):
+                template = 'JSON_QUERY(%s, %s WITH WRAPPER) IS NOT NULL'
+            else:
+                template = 'JSON_QUERY(%s, %%s WITH WRAPPER) IS NOT NULL'
+            sql, params = node.as_sql(self, self.connection, template=template)
         elif isinstance(node, OrderBy):
             sql, params = node.as_oracle(self, self.connection)
         elif isinstance(node, Exact) and isinstance(node.lhs, Exists) and isinstance(node.rhs, Exists):
@@ -94,36 +118,40 @@ class SQLCompiler(compiler.SQLCompiler):
         lhs_sql, params = node.process_lhs(self, self.connection)
         rhs_sql, rhs_params = node.process_rhs(self, self.connection)
         params.extend(rhs_params)
-        rhs_sql = 'AND %s' % rhs_sql
-        return '%s %s' % (lhs_sql, rhs_sql), params
+        params.extend(params)
+        sql = ('CASE WHEN %s AND %s THEN TRUE WHEN NOT %s AND NOT %s THEN TRUE ELSE FALSE END' %
+               (lhs_sql, rhs_sql, lhs_sql, rhs_sql))
+        return sql, params
+
+if not ADAPT_JSON_VALUE:
+    class DMJSONField(JSONField):
+
+        def get_prep_value(self, value):
+            if value is None:
+                return value
+            return json.dumps(value, ensure_ascii=False, cls=self.encoder)
 
 class SQLInsertCompiler(compiler.SQLInsertCompiler, SQLCompiler):
     def __init__(self, *args, **kwargs):
         self.return_id = False
         super(SQLInsertCompiler, self).__init__(*args, **kwargs)
-
-    def fix_auto(self, sql, opts, fields, qn):
-        if opts.auto_field is not None:
-            auto_field_column = opts.auto_field.db_column or opts.auto_field.column
-            columns = [f.column for f in fields]
-
-            if auto_field_column in columns and fields or not fields and auto_field_column:
-                table = qn(opts.db_table)
-                sql_format = 'SET IDENTITY_INSERT %s ON WITH REPLACE NULL; %s; SET IDENTITY_INSERT %s OFF;'
-                sql = sql_format % (table, sql, table)
-
-        return sql
     
     def as_sql(self):
-        result = super().as_sql()
-        for sql, params in result:
-            opts = self.query.get_meta()
-
-            qn = self.connection.ops.quote_name
-
-            sql = self.fix_auto(sql, opts, self.query.fields, qn)
-
-        return [(sql, params),]
+        from django.db.models.sql.subqueries import InsertQuery
+        if isinstance(self.query, InsertQuery):
+            if not ADAPT_JSON_VALUE:
+                opts = self.query.get_meta()
+                fields = self.query.fields or [opts.pk]
+                for i, field in enumerate(fields):
+                    if isinstance(field, JSONField):
+                        temp_field = DMJSONField()
+                        temp_field.__dict__.update(field.__dict__)
+                        self.query.fields[i] = temp_field
+            result = super().as_sql()
+            return self.connection.features.parse_module.adjust_insert_sql(self, result)
+        else:
+            result = super().as_sql()
+            return result
 
 class SQLDeleteCompiler(compiler.SQLDeleteCompiler, SQLCompiler):
     pass

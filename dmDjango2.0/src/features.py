@@ -1,5 +1,6 @@
 from django.db.backends.base.features import BaseDatabaseFeatures
 from django.db.utils import InterfaceError
+from .extension import DMDialect_Adapter
 
 try:
     import pytz
@@ -48,6 +49,7 @@ class DatabaseFeatures(BaseDatabaseFeatures):
 
     # Only for dmDjango
     compatible_mode = 0
+    parse_module = DMDialect_Adapter()
 
     def introspected_boolean_field_type(self, field=None, created_separately=False):    
         return super(DatabaseFeatures, self).introspected_boolean_field_type(field, created_separately)

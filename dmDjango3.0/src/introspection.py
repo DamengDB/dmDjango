@@ -37,13 +37,8 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
         return name.lower()
     
     def get_field_type(self, data_type, description):
-        """
-        description:
-        name type_code display_size internal_size precision scale null_ok default is_autofield is_json
-        0    1         2            3             4         5     6       7       8            9
-        """
         if data_type == dmPython.NUMBER:
-            precision, scale, null_ok, default, is_auto = description[4:9]
+            precision, scale, is_auto = description[4], description[5], description[-2]
             if scale == 0:
                 if precision > 11:
                     return 'BigAutoField' if is_auto else 'BigIntegerField'
@@ -57,7 +52,7 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
                     return 'IntegerField'
                 
         if data_type == dmPython.BIGINT:
-            precision, scale, null_ok, default, is_auto = description[4:9]
+            is_auto = description[-2]
             return 'BigAutoField' if is_auto else 'BigIntegerField'
                 
         if data_type == dmPython.CLOB and description.is_json:
@@ -66,7 +61,6 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
         return super().get_field_type(data_type, description)    
 
     def get_table_list(self, cursor):
-        "Returns a list of table names in the current database."
         cursor.execute("""SELECT all_tables.table_name,
                 't'            
                 FROM all_tables
@@ -84,6 +78,20 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
             
         return [TableInfo(self.identifier_converter(row[0]), row[1])
                 for row in cursor.fetchall()]
+
+    def _get_identity_info(self, cursor, table_name):
+
+        query = """
+                select name as "col_name", id as "tab_id" from syscolumns where id IN 
+                (select id from sysobjects where name = UPPER(?) and SUBTYPE$ = 'UTAB' and schid = 
+                (select id from sysobjects where name = SYS_CONTEXT('userenv', 'current_schema') and TYPE$ = 'SCH')
+                and info3 & 0x3F not in(0x05 ,0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27)) and info2 & 1 = 1
+                and IDENT_SEED(UPPER(?)) = 1 and IDENT_INCR(UPPER(?)) = 1;
+        """
+
+        cursor.execute(query, [table_name.replace("'", "''") * 3])
+        result = cursor.fetchall()
+        return result
 
     def get_table_description(self, cursor, table_name):
         """
@@ -123,6 +131,11 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
             column: (internal_size, default if default != 'NULL' else None, is_json)
             for column, default, internal_size, is_json in cursor.fetchall()
         }
+        identity_info = self._get_identity_info(cursor, table_name)
+        if len(identity_info) != 0:
+            identity_col_name = identity_info[0][0]
+        else:
+            identity_col_name = None
         self.cache_bust_counter += 1
         cursor.execute("SELECT * FROM {} WHERE ROWNUM < 2 AND {} > 0".format(
             self.connection.ops.quote_name(table_name.replace('\'', '\'\'')),
@@ -135,12 +148,12 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
             if length == 10:
                 description.append(FieldInfo(
                     self.identifier_converter(name), desc[1], desc[2], desc[3], desc[4] or 0,
-                    desc[5] or 0, desc[6], default, None, is_json
+                    desc[5] or 0, desc[6], default, True if name == identity_col_name else False, is_json
                 ))
             else:
                 description.append(FieldInfo(
                     self.identifier_converter(name), desc[1], desc[2], desc[3], desc[4] or 0,
-                    desc[5] or 0, desc[6], default, None, None, is_json
+                    desc[5] or 0, desc[6], default, None, True if name == identity_col_name else False, is_json
                 ))
         return description
 
@@ -278,6 +291,7 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
             SELECT
                 ind.index_name,
                 ind.index_type,
+                ind.uniqueness,
                 LISTAGG(LOWER(cols.column_name), ',') WITHIN GROUP (ORDER BY cols.column_position),
                 LISTAGG(cols.descend, ',') WITHIN GROUP (ORDER BY cols.column_position)
             FROM
@@ -289,16 +303,16 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
                     FROM user_constraints cons
                     WHERE ind.index_name = cons.index_name
                 ) AND cols.index_name = ind.index_name
-            GROUP BY ind.index_name, ind.index_type
+            GROUP BY ind.index_name, ind.index_type, ind.uniqueness
         """ % table_name.upper().replace('\'', '\'\''))
         rows = cursor.fetchall()
-        for constraint, type_, columns, orders in rows:
+        for constraint, type_, uniqueness, columns, orders in rows:
             if isinstance(constraint, str) and re.findall(r'INDEX\d{8}', constraint):
                 continue            
             constraint = self.identifier_converter(constraint)
             constraints[constraint] = {
                 'primary_key': False,
-                'unique': False,
+                'unique': True if uniqueness == 'UNIQUE' else False,
                 'foreign_key': None,
                 'check': False,
                 'index': True,

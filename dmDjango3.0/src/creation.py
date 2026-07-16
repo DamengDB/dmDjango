@@ -1,6 +1,6 @@
 import sys
 import time
-
+import copy
 from django.db.backends.base.creation import BaseDatabaseCreation
 
 TEST_DATABASE_PREFIX = 'test_'
@@ -10,62 +10,19 @@ class DatabaseCreation(BaseDatabaseCreation):
         TEST_NAME = self._test_database_name()
         TEST_USER = self._test_database_user()
         TEST_PASSWD = self._test_database_passwd()
-        TEST_TBLSPACE = self._test_database_tblspace()
-        TEST_TBLSPACE_TMP = self._test_database_tblspace_tmp()
+        TEST_TABLESPACE = self._test_database_tablespace()
+        TEST_TABLESPACE_TMP = self._test_database_tablespace_tmp()
 
         parameters = {
             'dbname': TEST_NAME,
             'user': TEST_USER,
             'password': TEST_PASSWD,
-            'tblspace': TEST_TBLSPACE,
-            'tblspace_temp': TEST_TBLSPACE_TMP,
+            'tablespace': TEST_TABLESPACE,
+            'tablespace_temp': TEST_TABLESPACE_TMP,
         }
 
         cursor = self.connection.cursor()
-        if self._test_database_create():
-            try:
-                self._execute_test_db_creation(cursor, parameters, verbosity, keepdb)
-            except Exception as e:
-                sys.stderr.write("Got an error creating the test database: %s\n" % e)
-                if not autoclobber:
-                    confirm = input("It appears the test database, %s, already exists. Type 'yes' to delete it, or 'no' to cancel: " % TEST_NAME)
-                if autoclobber or confirm == 'yes':
-                    try:
-                        if verbosity >= 1:
-                            print("Destroying old test database '%s'..." % self.connection.alias)
-                        self._destroy_test_user(cursor, parameters, verbosity)
-                        self._execute_test_db_destruction(cursor, parameters, verbosity)
-                        self._execute_test_db_creation(cursor, parameters, verbosity, keepdb)
-                    except Exception as e:
-                        sys.stderr.write("Got an error recreating the test database: %s\n" % e)
-                        sys.exit(2)
-                else:
-                    print("Tests cancelled.")
-                    sys.exit(1)
-
-        if self._test_user_create():
-            if verbosity >= 1:
-                print("Creating test user...")
-            try:
-                self._create_test_user(cursor, parameters, verbosity, keepdb)
-            except Exception as e:
-                sys.stderr.write("Got an error creating the test user: %s\n" % e)
-                if not autoclobber:
-                    confirm = input("It appears the test user, %s, already exists. Type 'yes' to delete it, or 'no' to cancel: " % TEST_USER)
-                if autoclobber or confirm == 'yes':
-                    try:
-                        if verbosity >= 1:
-                            print("Destroying old test user...")
-                        self._destroy_test_user(cursor, parameters, verbosity)
-                        if verbosity >= 1:
-                            print("Creating test user...")
-                        self._create_test_user(cursor, parameters, verbosity, keepdb)
-                    except Exception as e:
-                        sys.stderr.write("Got an error recreating the test user: %s\n" % e)
-                        sys.exit(2)
-                else:
-                    print("Tests cancelled.")
-                    sys.exit(1)
+        self.connection.features.parse_module.create_test_db(self, cursor, parameters, verbosity, autoclobber)
 
         self.connection.settings_dict['SAVED_USER'] = self.connection.settings_dict['USER']
         self.connection.settings_dict['SAVED_PASSWORD'] = self.connection.settings_dict['PASSWORD']
@@ -82,8 +39,8 @@ class DatabaseCreation(BaseDatabaseCreation):
         TEST_NAME = self._test_database_name()
         TEST_USER = self._test_database_user()
         TEST_PASSWD = self._test_database_passwd()
-        TEST_TBLSPACE = self._test_database_tblspace()
-        TEST_TBLSPACE_TMP = self._test_database_tblspace_tmp()
+        TEST_TABLESPACE = self._test_database_tablespace()
+        TEST_TABLESPACE_TMP = self._test_database_tablespace_tmp()
 
         self.connection.settings_dict['USER'] = self.connection.settings_dict['SAVED_USER']
         self.connection.settings_dict['PASSWORD'] = self.connection.settings_dict['SAVED_PASSWORD']
@@ -92,8 +49,8 @@ class DatabaseCreation(BaseDatabaseCreation):
             'dbname': TEST_NAME,
             'user': TEST_USER,
             'password': TEST_PASSWD,
-            'tblspace': TEST_TBLSPACE,
-            'tblspace_temp': TEST_TBLSPACE_TMP,
+            'tablespace': TEST_TABLESPACE,
+            'tablespace_temp': TEST_TABLESPACE_TMP,
         }
 
         cursor = self.connection.cursor()
@@ -112,56 +69,45 @@ class DatabaseCreation(BaseDatabaseCreation):
     def _execute_test_db_creation(self, cursor, parameters, verbosity, keepdb=False):
         if verbosity >= 2:
             print("_create_test_db(): dbname = %s" % parameters['dbname'])
-        statements = [
-            """CREATE TABLESPACE "{}"
-               DATAFILE '{}' SIZE 128
-               AUTOEXTEND ON NEXT 10
-            """.format(parameters["tblspace"].replace('"', '""'), parameters["tblspace"].replace("'", "''") + ".dbf"),
-        ]
-        self._execute_statements(cursor, statements, parameters, verbosity)
+        parse_module = self.connection.features.parse_module
+        tblsapce = parse_module.test_add_dquote_name(parameters["tablespace"])
+        dbf_name = parse_module.test_add_quote_name(parameters["tablespace"] + ".dbf")
+        statements = parse_module.test_create_db_statement
+        temp_statements = copy.deepcopy(statements)
+        if len(statements) == 3:
+            temp_statements[1] = temp_statements[1].format(tblsapce, dbf_name)
+        else:
+            temp_statements[0] = temp_statements[0].format(tblsapce, dbf_name)
+        self._execute_statements(cursor, temp_statements, parameters, verbosity)
 
     def _create_test_user(self, cursor, parameters, verbosity, keepdb=False):
         if verbosity >= 2:
             print("_create_test_user(): username = %s" % parameters['user'])
-        statements = [
-            """CREATE USER "%(user)s"
-               IDENTIFIED BY "%(password)s"
-               DEFAULT TABLESPACE "%(tblspace)s"
-            """,
-            """GRANT CREATE SESSION,
-                     CREATE TABLE,
-                     CREATE SEQUENCE,
-                     CREATE PROCEDURE,
-                     CREATE TRIGGER,
-                     CREATE INDEX,
-                     CREATE VIEW,
-                     CREATE MATERIALIZED VIEW
-               TO "%(user)s"
-               """,
-        ]
+        parse_module = self.connection.features.parse_module
+        statements = parse_module.test_create_user_statement
         parameters["user"] = parameters["user"].replace('"', '""')
-        parameters["password"] = parameters["password"].replace('"', '""')
-        parameters["tblspace"] = parameters["tblspace"].replace('"', '""')
+        parameters["password"] = parse_module.test_add_dquote_name(parameters["password"])
+        parameters["tablespace"] = parse_module.test_add_dquote_name(parameters["tablespace"])
         self._execute_statements(cursor, statements, parameters, verbosity)
 
     def _execute_test_db_destruction(self, cursor, parameters, verbosity):
         if verbosity >= 2:
             print("_execute_test_db_destruction(): dbname=%s" % parameters['dbname'])
-        statements = [
-            'DROP TABLESPACE if exists "%(tblspace)s" ',
-            ]
-        parameters["tblspace"] = parameters["tblspace"].replace('"', '""')
-        self._execute_statements(cursor, statements, parameters, verbosity)
+        parse_module = self.connection.features.parse_module
+        statements = parse_module.test_drop_db_statement
+        temp_param = copy.deepcopy(parameters)
+        temp_param["tablespace"] = parse_module.test_add_dquote_name(temp_param["tablespace"])
+        self._execute_statements(cursor, statements, temp_param, verbosity)
 
     def _destroy_test_user(self, cursor, parameters, verbosity):
         if verbosity >= 2:
             print("_destroy_test_user(): user=%s" % parameters['user'])
             print("Be patient.  This can take some time...")
-        statements = [
-            'DROP USER IF EXISTS "%(user)s" CASCADE',
-        ]
-        parameters["user"] = parameters["user"].replace('"', '""')
-        self._execute_statements(cursor, statements, parameters, verbosity)
+        parse_module = self.connection.features.parse_module
+        statements = parse_module.test_drop_user_statement
+        temp_param = copy.deepcopy(parameters)
+        temp_param["user"] = parse_module.test_add_dquote_name(temp_param["user"])
+        self._execute_statements(cursor, statements, temp_param, verbosity)
 
     def _execute_statements(self, cursor, statements, parameters, verbosity):
         for template in statements:
@@ -223,20 +169,20 @@ class DatabaseCreation(BaseDatabaseCreation):
             pass
         return name
 
-    def _test_database_tblspace(self):
+    def _test_database_tablespace(self):
         name = TEST_DATABASE_PREFIX + self.connection.settings_dict['NAME']
         try:
-            if self.connection.settings_dict['TEST_TBLSPACE']:
-                name = self.connection.settings_dict['TEST_TBLSPACE']
+            if self.connection.settings_dict['TEST_TABLESPACE']:
+                name = self.connection.settings_dict['TEST_TABLESPACE']
         except KeyError:
             pass
         return name
 
-    def _test_database_tblspace_tmp(self):
+    def _test_database_tablespace_tmp(self):
         name = TEST_DATABASE_PREFIX + self.connection.settings_dict['NAME'] + '_temp'
         try:
-            if self.connection.settings_dict['TEST_TBLSPACE_TMP']:
-                name = self.connection.settings_dict['TEST_TBLSPACE_TMP']
+            if self.connection.settings_dict['TEST_TABLESPACE_TMP']:
+                name = self.connection.settings_dict['TEST_TABLESPACE_TMP']
         except KeyError:
             pass
         return name

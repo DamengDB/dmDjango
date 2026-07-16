@@ -1,5 +1,6 @@
 from django.db.backends.base.features import BaseDatabaseFeatures
 from django.db.utils import InterfaceError
+from .extension import DMDialect_Adapter
 
 try:
     import pytz
@@ -46,12 +47,13 @@ class DatabaseFeatures(BaseDatabaseFeatures):
     
     supports_primitives_in_json_field = True
     supports_json_field_contains = True
-    
+    supports_json_negative_indexing = False
     supports_partial_indexes = False
     supports_json_field = True
 
     supports_ignore_conflicts = False
     supports_boolean_expr_in_select_clause = False
+    supports_aggregate_distinct_multiple_argument = False
     
     supports_deferrable_unique_constraints = False
     allows_multiple_constraints_on_same_fields = False
@@ -81,3 +83,4 @@ class DatabaseFeatures(BaseDatabaseFeatures):
 
     # Only for dmDjango
     compatible_mode = 0
+    parse_module = DMDialect_Adapter()

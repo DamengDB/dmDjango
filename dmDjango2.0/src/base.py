@@ -3,22 +3,15 @@ Dameng database backend for Django.
 """
 from __future__ import unicode_literals
 
-import datetime
-import decimal
-import os, re
-import platform
+import re
 import sys
-import warnings
 import django
-
-from django.conf import settings
 from django.db import utils
 from django.db.backends.base.base import BaseDatabaseWrapper
+from .extension import DMTSQLDialect_Adapter, DMMySQLDialect_Adapter
 from django.db.backends.base.validation import BaseDatabaseValidation
 if django.VERSION < (3, 0):
-    from django.utils import six, timezone
-from django.utils.duration import duration_string
-from django.utils.encoding import force_bytes, force_text
+    from django.utils import six
 from django.utils.functional import cached_property, SimpleLazyObject
 
 try:
@@ -35,13 +28,12 @@ from .features import DatabaseFeatures                  # isort:skip
 from .introspection import DatabaseIntrospection        # isort:skip
 from .operations import DatabaseOperations              # isort:skip
 from .schema import DatabaseSchemaEditor                # isort:skip
-from .utils import convert_unicode                      # isort:skip
 
 DatabaseError = Database.DatabaseError
 IntegrityError = Database.IntegrityError   
 
 class DatabaseWrapper(BaseDatabaseWrapper):
-    vendor = 'Dameng'
+    vendor = 'dameng'
     
     data_types = {
         'AutoField': 'INTEGER IDENTITY(1,1)',
@@ -51,7 +43,7 @@ class DatabaseWrapper(BaseDatabaseWrapper):
         'CharField': 'NVARCHAR2(%(max_length)s)',
         'CommaSeparatedIntegerField': 'VARCHAR(%(max_length)s)',
         'DateField': 'DATE',
-        'DateTimeField': 'TIMESTAMP',
+        'DateTimeField': 'TIMESTAMP(6)',
         'DecimalField': 'NUMBER(%(max_digits)s, %(decimal_places)s)',
         'DurationField': 'INTERVAL DAY(9) TO SECOND(6)',
         'FileField': 'NVARCHAR2(%(max_length)s)',
@@ -80,31 +72,6 @@ class DatabaseWrapper(BaseDatabaseWrapper):
         'PositiveSmallIntegerField': '%(qn_column)s >= 0',
     }
 
-    operators = {
-        'exact': '= %s',
-        'iexact': '= UPPER(%s)',
-        'contains': "LIKE %s ESCAPE '\\'",
-        'icontains': "LIKE UPPER(%s) ESCAPE '\\'",
-        'gt': '> %s',
-        'gte': '>= %s',
-        'lt': '< %s',
-        'lte': '<= %s',
-        'startswith': "LIKE %s ESCAPE '\\'",
-        'endswith': "LIKE %s ESCAPE '\\'",
-        'istartswith': "LIKE UPPER(%s) ESCAPE '\\'",
-        'iendswith': "LIKE UPPER(%s) ESCAPE '\\'",
-    }
-
-    pattern_esc = r"REPLACE(REPLACE(REPLACE({}, '\', '\\'), '%', '\%'), '_', '\_')"
-    pattern_ops = {
-        'contains': r"LIKE '%' || {} || '%' ESCAPE '\'",
-        'icontains': r"LIKE '%' || UPPER({}) || '%' ESCAPE '\'",
-        'startswith': r"LIKE {} || '%' ESCAPE '\'",
-        'istartswith': r"LIKE UPPER({}) || '%%' ESCAPE '\'",
-        'endswith': r"LIKE '%' || {} ESCAPE '\'",
-        'iendswith': r"LIKE '%' || UPPER({}) ESCAPE '\'",
-    }
-
     Database = Database
     SchemaEditorClass = DatabaseSchemaEditor
     client_class = DatabaseClient
@@ -122,21 +89,28 @@ class DatabaseWrapper(BaseDatabaseWrapper):
         self.client = DatabaseClient(self)
         self.creation = DatabaseCreation(self)
         self.introspection = DatabaseIntrospection(self)
-        self.validation = BaseDatabaseValidation(self)    
-        
+        self.validation = BaseDatabaseValidation(self)
+
     def get_connection_params(self):        
         conn_params = self.settings_dict['OPTIONS'].copy()        
         return conn_params
     
+    def _get_dict_value(self, settings_dict, key_name, default_value):
+        dict_name = settings_dict[key_name]
+        if dict_name != '' and dict_name is not None:
+            return dict_name.strip()
+        else:
+            return default_value
+
     def _connect_string(self):
-        settings_dict = self.settings_dict            
-        user = settings_dict['OPTIONS'].get('user', settings_dict['USER'].strip())
-        passwd = settings_dict['OPTIONS'].get('passwd', settings_dict['PASSWORD'].strip())
-        host = settings_dict['OPTIONS'].get('host', settings_dict['HOST'].strip())
-        port = settings_dict['OPTIONS'].get('port', settings_dict['PORT'].strip())        
+        settings_dict = self.settings_dict
+        user = self._get_dict_value(settings_dict, 'USER', 'SYSDBA')
+        passwd = self._get_dict_value(settings_dict, 'PASSWORD', '')
+        host = self._get_dict_value(settings_dict, 'HOST', 'localhost')
+        port = self._get_dict_value(settings_dict, 'PORT', 5236)
         mpp_type = settings_dict['OPTIONS'].get('mpp_type', {}).get('mpp_type')
         ssl_path = settings_dict['OPTIONS'].get('ssl_path', {}).get('ssl_path')
-        ssl_pwd = settings_dict['OPTIONS'].get('ssl_pwd', {}).get('ssl_pwd')            
+        ssl_pwd = settings_dict['OPTIONS'].get('ssl_pwd', {}).get('ssl_pwd')
         
         conn_param = {}
         conn_param['user'] = user
@@ -177,6 +151,29 @@ class DatabaseWrapper(BaseDatabaseWrapper):
                                  "the following compatibility modes:\n"
                                  "            0:none, 1:SQL92, 2:Oracle, 3:MS SQL Server, "
                                  "4:MySQL, 5:DM6, 6:Teradata, 7:PG, 8:DB2")
+
+        if 'parse_type' in conn_params:
+            if type(conn_params['parse_type']) is str:
+                parse_type = conn_params['parse_type'].upper()
+                if parse_type in ['DM', 'TSQL', 'MYSQL']:
+                    if parse_type == 'TSQL':
+                        self.features.parse_module = DMTSQLDialect_Adapter()
+                    elif parse_type == 'MYSQL':
+                        self.data_types['AutoField'] = 'INTEGER AUTO_INCREMENT'
+                        self.data_types['BigAutoField'] = 'BIGINT AUTO_INCREMENT'
+                        self.data_types['DurationField'] = 'BIGINT'
+                        self.features.parse_module = DMMySQLDialect_Adapter()
+                        self.features.has_native_duration_field = False
+                        self.features.allows_auto_pk_0 = False
+                        self.SchemaEditorClass.sql_create_fk = self.features.parse_module.sql_create_fk
+                else:
+                    raise ValueError("The parameter parse_type can only be set to one of DM, TSQL or MySQL")
+            else:
+                raise ValueError("The parameter parse_type can only be set to string type")
+
+        self.operators = self.features.parse_module.operators
+        self.pattern_esc = self.features.parse_module.pattern_esc
+        self.pattern_ops = self.features.parse_module.pattern_ops
 
         return Database.connect(user=params['user'],
                                 password=params['password'],
@@ -231,6 +228,8 @@ def _lazy_re_compile(regex, flags=0):
 
 FORMAT_QMARK_REGEX = _lazy_re_compile(r'(?<!%)%s')
 BYTES_FORMAT_QMARK_REGEX = _lazy_re_compile(b'(?<!%)%s')
+PYFORMAT_QMARK_REGEX = _lazy_re_compile(r'%\((\w+)\)s')
+BYTES_PYFORMAT_QMARK_REGEX = _lazy_re_compile(b'(?<!%)%s')
 
 class CursorWrapper(object):
         
@@ -248,23 +247,38 @@ class CursorWrapper(object):
             else:
                 return FORMAT_QMARK_REGEX.sub('?', query).replace('%%', '%')
 
+    def convert_query_dict_args(self, query):
+        if isinstance(query, bytes):
+            return BYTES_PYFORMAT_QMARK_REGEX.sub(r':\1', query).replace('%%', '%')
+        else:
+            if sys.version_info[0] == 2:
+                return re.sub(PYFORMAT_QMARK_REGEX, r':\1', query).replace('%%', '%')
+            else:
+                res = PYFORMAT_QMARK_REGEX.sub(r':\1', query).replace('%%', '%')
+                return res
+
     def execute(self, query, args=None):
         try:
             # args is None means no string interpolation
-            query = self.convert_query(query)
+            if type(args) is dict:
+                query = self.convert_query_dict_args(query)
+            else:
+                query = self.convert_query(query)
             return self.cursor.execute(query, args)
         except Database.OperationalError as e:
             # Map some error codes to IntegrityError, since they seem to be
             # misclassified and Django would prefer the more logical place.
             if e.args[0] in self.codes_for_integrityerror:
-                if django.VERSION<(3,0):
+                if django.VERSION < (3, 0):
                     six.reraise(utils.IntegrityError, utils.IntegrityError(*tuple(e.args)), sys.exc_info()[2])
-                if django.VERSION>=(3,0):
+                if django.VERSION >= (3, 0):
                     raise utils.IntegrityError(*tuple(e.args))
             raise
 
     def executemany(self, query, args):
         try:
+            query = self.convert_query(query)
+            query = self.convert_query_dict_args(query)
             return self.cursor.executemany(query, args)
         except Database.OperationalError as e:
             # Map some error codes to IntegrityError, since they seem to be
@@ -272,7 +286,7 @@ class CursorWrapper(object):
             if e.args[0] in self.codes_for_integrityerror:
                 if django.VERSION < (3, 0):
                     six.reraise(utils.IntegrityError, utils.IntegrityError(*tuple(e.args)), sys.exc_info()[2])
-                if django.VERSION>=(3,0):
+                if django.VERSION >= (3, 0):
                     raise utils.IntegrityError(*tuple(e.args))
             raise
 
